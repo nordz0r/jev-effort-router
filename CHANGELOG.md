@@ -4,6 +4,22 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0-ocx] - 2026-09-25
+
+### Added
+
+- Routing on any configured provider, e.g. a single OpenCodex (ocx) endpoint: `routed_providers` and
+  `routed_base_urls` replace the hardcoded `ollama-cloud` gate (still the default).
+- Grid ids may be `provider/model` or `combo/<id>`; `"id: description"` now splits on `": "` first, so
+  ids containing a colon survive.
+- `unknown_effort` (`keep`/`omit`/`pass`) for `combo/<id>` and unrecognised `provider/model` ids.
+- `catalog_check`; the Ollama:cloud model cache is only consulted for the `ollama-cloud` provider.
+
+### Changed
+
+- A below-threshold decision whose `default_model` is not on the grid now leaves the request untouched
+  instead of sending an id the provider may not have.
+
 ## [0.2.0] - 2026-09-23
 
 ### Changed

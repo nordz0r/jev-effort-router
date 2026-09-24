@@ -29,7 +29,8 @@ from .client import (
     Decision,
     JevClient,
 )
-from .config import ROUTED_API_MODES, ROUTED_PROVIDER, ROUTED_PROVIDER_ALIASES, Settings
+from .config import ROUTED_API_MODES, Settings
+from .effort import family_for
 from .memo import Memo, TurnMemo
 from .state import last_user_message
 
@@ -122,8 +123,7 @@ class Router:
             return None
 
         # -- skip gates: anything the router does not own goes out untouched ---------
-        provider_key = (provider or "").strip().lower()
-        if provider_key not in ("", ROUTED_PROVIDER) and provider_key not in ROUTED_PROVIDER_ALIASES:
+        if not settings.routes(provider, base_url):
             self._record_skip(settings, REASON_SKIPPED_PROVIDER, where)
             return None
         if api_mode and api_mode not in ROUTED_API_MODES:
@@ -150,7 +150,7 @@ class Router:
                 # A decision naming a model the provider does not have is worse than no decision:
                 # asking for it turns a degraded turn into a dead one (HTTP 404, no response).
                 # Leave the request exactly as the operator configured it.
-                if not self._provider_has(decision.model):
+                if settings.checks_catalog(provider) and not self._provider_has(decision.model):
                     logger.warning(
                         "jev-effort-router: Jev chose %r, which is not in the provider's catalog; "
                         "leaving the turn on the configured model",
@@ -178,7 +178,7 @@ class Router:
                 else:
                     self._memo.put_session(session_id, memo)
 
-            routed = self._apply(original_request, decision)
+            routed = self._apply(original_request, decision, settings.unknown_effort)
             self._record_route(settings, decision, where, api_call_count=api_call_count, replayed=replayed)
             return {"request": routed, "source": "jev-effort-router", "reason": decision.model}
         except Exception as exc:  # noqa: BLE001 - a router must never break a turn
@@ -252,7 +252,9 @@ class Router:
             return None
         return decision
 
-    def _apply(self, original_request: Dict[str, Any], decision: Decision) -> Dict[str, Any]:
+    def _apply(
+        self, original_request: Dict[str, Any], decision: Decision, unknown_effort: str = "keep"
+    ) -> Dict[str, Any]:
         """Build the rewritten request from the pre-middleware payload.
 
         Working from ``original_request`` keeps this router idempotent when more than one
@@ -271,8 +273,9 @@ class Router:
         routed["model"] = decision.model
         if decision.effort:
             routed[EFFORT_WIRE_KEY] = decision.effort
-        else:
+        elif family_for(decision.model) is not None or unknown_effort == "omit":
             routed.pop(EFFORT_WIRE_KEY, None)
+        # else: no known effort family and ``unknown_effort: keep`` — the host's value stays.
         return routed
 
     # -- audit -------------------------------------------------------------------
@@ -349,6 +352,8 @@ class Router:
         "every entry is fine".
         """
         report: List[Dict[str, Any]] = []
+        if not settings.checks_catalog(""):
+            return report
         for entry in settings.grid:
             try:
                 known = self._catalog.is_known(entry.model_id)

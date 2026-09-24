@@ -1,12 +1,12 @@
 name: jev-effort-router
-version: 0.2.1
+version: 0.3.0-ocx
 manifest_version: 2
 api_version: 1
-description: Route each user turn to the best Ollama:Cloud model and reasoning effort via TypeSafe Jev's decision endpoint. Ollama:Cloud only — no other provider is routed.
+description: Route each user turn to the best model and reasoning effort via TypeSafe Jev's decision endpoint. Routes Ollama:Cloud by default, or any configured OpenAI-compatible provider such as an OpenCodex (ocx) endpoint with provider/model and combo/<id> ids.
 author: AlphaPerseii3000
 license: MIT
 homepage: https://github.com/AlphaPerseii3000/jev-effort-router
-tags: [routing, models, reasoning, ollama-cloud, decisions]
+tags: [routing, models, reasoning, ollama-cloud, ocx, decisions]
 # ``provides_middleware`` is not in the host's ``_KNOWN_MANIFEST_FIELDS``, so declaring it emits an
 # "unknown manifest field(s) ignored" warning on every load. It is declared anyway, deliberately:
 # ``hermes plugins validate`` diffs the manifest against what ``register(ctx)`` actually wires and
@@ -90,3 +90,24 @@ config_schema:
     default: null
     label: Routing grid override
     description: 'Optional list of entries, each "model-id: description", replacing the built-in six-model grid.'
+  routed_providers:
+    type: list
+    default: null
+    label: Routed providers
+    description: Hermes provider names whose requests are routed. Empty keeps the default (ollama-cloud).
+  routed_base_urls:
+    type: list
+    default: null
+    label: Routed base URLs
+    description: Also route any request whose base_url starts with one of these (e.g. an ocx endpoint).
+  catalog_check:
+    type: bool
+    default: true
+    label: Ollama catalog check
+    description: Refuse a decision naming a model missing from Hermes' Ollama:cloud model cache. Applies to ollama-cloud only; for other providers the grid is the allowlist.
+  unknown_effort:
+    type: str
+    default: keep
+    choices: [keep, omit, pass]
+    label: Effort for unknown model families
+    description: 'For combo/<id> and unrecognised provider/model ids: keep the request''s reasoning_effort, omit it, or pass Jev''s level through.'

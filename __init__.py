@@ -1,9 +1,10 @@
 """jev-effort-router — route each Hermes turn through TypeSafe Jev's decision endpoint.
 
 What it does: on the first provider request of every user turn, ask Jev (`typesafe/jev-1.13`
-over OpenRouter's Decisions API) which Ollama:cloud model and which reasoning-effort level fit
-the task, then rewrite the outgoing request accordingly. Jev generates nothing; the selected
-model still does all the reasoning and all the writing.
+over OpenRouter's Decisions API) which grid model (Ollama:cloud, or ocx ``provider/model`` /
+``combo/<id>``) and which reasoning-effort level fit the task, then rewrite the outgoing
+request accordingly. Jev generates nothing; the selected model still does all the reasoning
+and all the writing.
 
 Where it plugs in: the ``llm_request`` middleware kind
 (``hermes_cli/middleware.py``, invoked from ``agent/turn_api_request.py::build_api_request``),

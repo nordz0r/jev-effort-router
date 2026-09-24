@@ -249,9 +249,11 @@ class JevClient:
 
         if chosen is None:
             chosen = self._settings.entry_for(settings.default_model)
-            model = chosen.model_id if chosen else settings.default_model
-        else:
-            model = chosen.model_id
+            if chosen is None:
+                # A fallback model outside the grid is not known to exist on this provider
+                # (the grid is the allowlist): keep the configured model instead.
+                return None, reasons[0] if reasons else REASON_LOW_CONFIDENCE
+        model = chosen.model_id
 
         # -- effort ----------------------------------------------------------------
         # A usable-but-distrusted effort answer (low confidence, off-vocabulary choice)
@@ -284,7 +286,7 @@ class JevClient:
         if requested is None and answered:
             requested = settings.default_effort
 
-        effort = resolve_effort(model, requested)
+        effort = resolve_effort(model, requested, settings.unknown_effort)
 
         alternatives = tuple(
             entry.model_id for entry in grid if entry.model_id != model

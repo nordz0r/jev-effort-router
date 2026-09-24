@@ -88,7 +88,8 @@ def parse_entry(raw: Any) -> Optional[Entry]:
     text = str(raw or "").strip()
     if not text:
         return None
-    model_id, separator, description = text.partition(":")
+    # Prefer ": " so an id carrying a colon (``nemotron-3-nano:30b``) survives a description.
+    model_id, separator, description = text.partition(": " if ": " in text else ":")
     model_id = model_id.strip()
     if not model_id:
         return None

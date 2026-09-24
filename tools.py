@@ -40,7 +40,7 @@ STATUS_SCHEMA = {
 ROUTE_SCHEMA = {
     "name": "jev_effort_router_route",
     "description": (
-        "Ask the Jev decision model which Ollama:cloud model and reasoning effort it would "
+        "Ask the Jev decision model which grid model and reasoning effort it would "
         "choose for a given task description, without changing the current session. Use it to "
         "test the routing grid, or to show the user what the router would pick. Returns the "
         "choice, its probabilities, the confidence, and the alternatives."

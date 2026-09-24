@@ -150,6 +150,36 @@ form generated from `plugin.yaml`.
 | `log_skips` | `true` | Record why a turn was left unrouted. |
 | `include_user_message_in_audit` | `false` | Off keeps conversation content out of the audit. |
 | `grid` | `null` | Optional `["model-id: description", ...]` replacing the built-in grid. |
+| `routed_providers` | `[ollama-cloud]` | Hermes provider names whose requests are routed. |
+| `routed_base_urls` | `[]` | Also route requests whose `base_url` starts with one of these. |
+| `catalog_check` | `true` | Check decisions against Hermes' Ollama:cloud model cache (ollama-cloud only). |
+| `unknown_effort` | `keep` | `combo/<id>` and unrecognised `provider/model` ids: `keep` the request's `reasoning_effort`, `omit` it, or `pass` Jev's level. |
+
+### Routing on an OpenCodex (ocx) endpoint
+
+ocx is one OpenAI-compatible endpoint that takes `provider/model` and `combo/<id>` model ids. Point the
+router at whatever Hermes provider name (or base URL) your deployment uses for it, and replace the grid —
+the grid is the allowlist, so only ids you list can be chosen, and the Ollama:cloud cache is not consulted.
+The configured session model must itself be one of the grid ids, or the turn is left alone.
+
+```yaml
+plugins:
+  entries:
+    jev-effort-router:
+      settings:
+        routed_providers: [my-ocx]                    # your Hermes provider name for ocx
+        # routed_base_urls: ["https://ocx.example.invalid/v1"]   # or match by endpoint
+        default_model: deepseek/deepseek-v4.1-flash   # must be a grid id
+        unknown_effort: keep
+        grid:
+          - "deepseek/deepseek-v4.1-flash: the usual choice for general work, everyday writing and ordinary coding"
+          - "anthropic/claude-sonnet-4.5: strongest at complex code and long agentic tasks"
+          - "combo/fast: trivial single-step requests only"
+```
+
+Effort is clamped per model family after stripping the `provider/` prefix (`deepseek/deepseek-v4.1-flash`
+→ DeepSeek's ladder). Grid descriptions are what Jev weighs; the built-in ones were measured on Ollama:cloud,
+so descriptions for your own grid are unmeasured until you check the audit log.
 
 ## How it behaves when things go wrong
 

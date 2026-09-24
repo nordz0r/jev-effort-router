@@ -52,14 +52,19 @@ FAMILIES: Tuple[Family, ...] = (
 )
 
 
-def family_for(model_id: Optional[str]) -> Family:
-    """Pick the family contract for a model id.
+def family_for(model_id: Optional[str]) -> Optional[Family]:
+    """Pick the family contract for a model id, or ``None`` when there is none to apply.
 
     Matching is a substring test on the bare slug, so ``kimi-k3``, ``kimi-k3-256k`` and a
-    ``vendor/kimi-k3`` prefix all land on the same row. Unknown models get the
-    Ollama:cloud vocabulary, which is the widest set this router's provider accepts.
+    ``vendor/kimi-k3`` prefix all land on the same row. An unknown bare id is an Ollama:cloud
+    model and gets that vocabulary, the widest set that provider accepts. An unknown
+    ``provider/model`` id and any ``combo/<id>`` (an ocx combo can be any model) have no
+    known contract: ``None``, and the caller decides via ``unknown_effort``.
     """
-    slug = (model_id or "").strip().lower().rsplit("/", 1)[-1]
+    raw = (model_id or "").strip().lower()
+    if raw.startswith("combo/"):
+        return None
+    slug = raw.rsplit("/", 1)[-1]
     if not slug:
         return OLLAMA_CLOUD
     if "kimi" in slug and _token(slug, "k3"):
@@ -72,7 +77,7 @@ def family_for(model_id: Optional[str]) -> Family:
         return FAMILIES[4]
     if "nemotron" in slug:
         return FAMILIES[5]
-    return OLLAMA_CLOUD
+    return None if "/" in raw else OLLAMA_CLOUD
 
 
 def _token(slug: str, needle: str) -> bool:
@@ -116,13 +121,18 @@ def clamp(
     return min(candidates, key=LADDER.index)
 
 
-def resolve_effort(model_id: Optional[str], effort: Optional[str]) -> Optional[str]:
-    """The exact value to put on the wire for ``model_id``, or ``None`` to omit the field."""
+def resolve_effort(model_id: Optional[str], effort: Optional[str], unknown: str = "keep") -> Optional[str]:
+    """The exact value to put on the wire for ``model_id``, or ``None`` to not write the field.
+
+    For a model with no known family only ``unknown="pass"`` writes a value (the requested
+    level, verbatim); ``keep``/``omit`` return ``None`` and the router applies the choice.
+    """
     family = family_for(model_id)
-    clamped = clamp(effort, family.accepted, family.overrides)
-    return clamped
+    if family is None:
+        return (str(effort or "").strip().lower() or None) if unknown == "pass" else None
+    return clamp(effort, family.accepted, family.overrides)
 
 
-def is_omitted(model_id: Optional[str], effort: Optional[str]) -> bool:
-    """True when the request would go out without a reasoning-effort field."""
-    return resolve_effort(model_id, effort) is None
+def is_omitted(model_id: Optional[str], effort: Optional[str], unknown: str = "keep") -> bool:
+    """True when the router would not write a reasoning-effort field."""
+    return resolve_effort(model_id, effort, unknown) is None
