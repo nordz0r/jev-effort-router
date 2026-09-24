@@ -135,8 +135,8 @@ def test_config_schema_matches_the_settings_the_plugin_reads(tmp_path):
 
     from config import Settings
 
-    # `endpoint` is read by load_settings but intentionally not exposed as a setting.
-    assert declared == set(Settings.__dataclass_fields__) - {"endpoint"}
+    # 0.3: `endpoint` is exposed as a per-backend override (empty = the backend's default).
+    assert declared == set(Settings.__dataclass_fields__)
 
 
 def test_status_tool_reports_the_grid_and_the_audit(plugin, tmp_path, monkeypatch):

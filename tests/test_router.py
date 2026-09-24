@@ -221,12 +221,13 @@ def test_malformed_body_leaves_the_request_untouched(tmp_path):
 def test_low_confidence_falls_back_to_the_configured_defaults(tmp_path):
 
     transport = StubTransport([StubResponse(decision_payload("2", 0.10, "high", 0.12))])
-    router, _ = build(tmp_path, transport, config={"default_model": "deepseek-v4.1-flash", "default_effort": "low"})
+    router, _ = build(tmp_path, transport, config={"default_model": "glm-5.3", "default_effort": "low"})
 
     result = route(router, ollama_request())
 
-    # The turn still goes out routed — on the fallback, and flagged as degraded.
-    assert result["request"]["model"] == "deepseek-v4.1-flash"
+    # The turn still goes out routed — on the fallback (more capable than the distrusted
+    # choice by grid position), and flagged as degraded.
+    assert result["request"]["model"] == "glm-5.3"
     assert result["request"]["reasoning_effort"] == "low"
     record = json.loads((tmp_path / "routes.jsonl").read_text(encoding="utf-8").strip().splitlines()[-1])
     # The model and the effort degrade independently, so a weak answer on both is recorded
@@ -237,7 +238,7 @@ def test_low_confidence_falls_back_to_the_configured_defaults(tmp_path):
 def test_unknown_choice_falls_back(tmp_path):
 
     transport = StubTransport([StubResponse(decision_payload("99", 0.99, "medium", 0.99))])
-    router, _ = build(tmp_path, transport)
+    router, _ = build(tmp_path, transport, config={"default_model": "deepseek-v4.1-flash"})
 
     result = route(router, ollama_request())
 
@@ -248,6 +249,7 @@ def test_unknown_choice_falls_back(tmp_path):
 
 def test_missing_api_key_is_inert(tmp_path, monkeypatch):
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.delenv("TYPESAFE_API_KEY", raising=False)
     transport = StubTransport([])
     router, _ = build(tmp_path, transport)
 

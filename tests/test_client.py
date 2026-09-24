@@ -25,7 +25,10 @@ MESSAGES = [
 
 
 def make(transport, config=None):
-    settings = load_settings(lambda key, default=None: (config or {}).get(key, default))
+    # These are the OpenRouter wire tests (the pre-0.3 default backend); TypeSafe's native
+    # backend is covered in test_backends.py.
+    config = {"backend": "openrouter", **(config or {})}
+    settings = load_settings(lambda key, default=None: config.get(key, default))
     return JevClient(settings, transport=transport), settings
 
 
@@ -44,17 +47,19 @@ def test_payload_matches_the_documented_shape(monkeypatch):
     state = payload["state"]
     assert state["user_message"] == "refactore le module de paiement"
     assert "première question" in state["recent_context"]
-    assert state["surface"] == "cli"
-    assert state["provider"] == "ollama-cloud"
+    # 0.3: surface and provider carry nothing about the task and are no longer sent.
+    assert "surface" not in state and "provider" not in state
+    assert state["user_message_chars"] == len("refactore le module de paiement")
     # The configured model is deliberately NOT sent: it anchors the decision on itself.
     assert "currently_configured_model" not in state
 
     questions = payload["questions"]
     assert questions["model_route"]["type"] == "choice"
-    assert set(questions["model_route"]["criteria"]) == {"1", "2", "3", "4", "5", "6"}
-    assert questions["model_route"]["criteria"]["1"].startswith("deepseek-v4.1-flash: ")
-    assert questions["reasoning_effort"]["type"] == "choice"
-    assert set(questions["reasoning_effort"]["criteria"]) == {"low", "medium", "high"}
+    assert set(questions["model_route"]["criteria"]) == {"1", "2", "3", "4", "5", "6", "unclear"}
+    # 0.3: options are task descriptions only; the model id is not sent to Jev.
+    assert "deepseek" not in questions["model_route"]["criteria"]["1"]
+    assert questions["reasoning_effort"]["type"] == "score"
+    assert len(questions["reasoning_effort"]["criteria"]) == 3
 
 
 def test_payload_is_stated_in_one_language(monkeypatch):
@@ -72,7 +77,8 @@ def test_payload_is_stated_in_one_language(monkeypatch):
     french = set("àâäçéèêëîïôöùûüœ")
     questions = transport.last_payload["questions"]
     for question in questions.values():
-        strings = [question["instructions"], *question["criteria"].values()]
+        criteria = question["criteria"]
+        strings = [question["instructions"], *(criteria.values() if isinstance(criteria, dict) else criteria)]
         for text in strings:
             offenders = sorted(french & set(text.lower()))
             assert not offenders, f"French text in the Jev payload: {offenders} in {text!r}"
@@ -181,7 +187,7 @@ def test_missing_answers(monkeypatch):
 
 def test_unknown_model_choice_degrades_to_the_fallback(monkeypatch):
     monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test")
-    client, _ = make(StubTransport([StubResponse(decision_payload("99", 0.99))]))
+    client, _ = make(StubTransport([StubResponse(decision_payload("99", 0.99))]), config={"default_model": "deepseek-v4.1-flash"})
 
     decision, reason = client.decide(MESSAGES, DEFAULT_GRID)
 
@@ -190,13 +196,25 @@ def test_unknown_model_choice_degrades_to_the_fallback(monkeypatch):
     assert REASON_UNKNOWN_CHOICE in decision.fallback_reasons
 
 
+def test_low_confidence_without_a_fallback_keeps_the_configured_model(monkeypatch):
+    # 0.3: `default_model` is empty by default, so a distrusted answer never downgrades the turn.
+    client, _ = make(StubTransport([StubResponse(decision_payload("2", 0.2, "high", 0.2))]))
+
+    decision, reason = client.decide(MESSAGES, DEFAULT_GRID)
+
+    assert decision is None
+    assert reason == REASON_LOW_CONFIDENCE
+
+
 def test_low_confidence_degrades(monkeypatch):
     monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test")
-    client, _ = make(StubTransport([StubResponse(decision_payload("2", 0.2, "high", 0.2))]))
+    # Below threshold the more capable of (choice, fallback) by grid position wins; here the
+    # fallback (glm-5.3, position 3) sits above the distrusted choice (kimi-k3, position 2).
+    client, _ = make(StubTransport([StubResponse(decision_payload("2", 0.2, "high", 0.2))]), config={"default_model": "glm-5.3"})
 
     decision, _ = client.decide(MESSAGES, DEFAULT_GRID)
 
-    assert decision.model == "deepseek-v4.1-flash"
+    assert decision.model == "glm-5.3"
     assert decision.effort == "medium"
     assert decision.fallback_reasons.count(REASON_LOW_CONFIDENCE) == 2
 
@@ -220,7 +238,8 @@ def test_non_choice_answer_types_are_treated_as_malformed(monkeypatch):
     client, _ = make(
         StubTransport(
             [StubResponse(decision_payload("1", 0.9, "medium", 0.9, model_type="noul", effort_type="noul"))]
-        )
+        ),
+        config={"default_model": "deepseek-v4.1-flash"},
     )
 
     decision, _ = client.decide(MESSAGES, DEFAULT_GRID)

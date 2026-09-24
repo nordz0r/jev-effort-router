@@ -58,8 +58,9 @@ def family_for(model_id: Optional[str]) -> Optional[Family]:
     Matching is a substring test on the bare slug, so ``kimi-k3``, ``kimi-k3-256k`` and a
     ``vendor/kimi-k3`` prefix all land on the same row. An unknown bare id is an Ollama:cloud
     model and gets that vocabulary, the widest set that provider accepts. An unknown
-    ``provider/model`` id and any ``combo/<id>`` (an ocx combo can be any model) have no
-    known contract: ``None``, and the caller decides via ``unknown_effort``.
+    ``provider/model`` id and any ``combo/<id>`` (a combo can be any model) have no known
+    contract: ``None``, and the caller decides via ``unknown_effort``. Only consulted for
+    Ollama:cloud routes (see :func:`resolve_effort`).
     """
     raw = (model_id or "").strip().lower()
     if raw.startswith("combo/"):
@@ -121,18 +122,22 @@ def clamp(
     return min(candidates, key=LADDER.index)
 
 
-def resolve_effort(model_id: Optional[str], effort: Optional[str], unknown: str = "keep") -> Optional[str]:
+def resolve_effort(
+    model_id: Optional[str], effort: Optional[str], unknown: str = "omit", families: bool = True
+) -> Optional[str]:
     """The exact value to put on the wire for ``model_id``, or ``None`` to not write the field.
 
-    For a model with no known family only ``unknown="pass"`` writes a value (the requested
-    level, verbatim); ``keep``/``omit`` return ``None`` and the router applies the choice.
+    ``families=False`` (every non-Ollama route) skips the table above: its vocabularies were
+    taken from Ollama:cloud's wire and say nothing about another upstream. With no family,
+    only ``unknown="pass"`` writes a value (the requested level, verbatim); ``omit``/``keep``
+    return ``None`` and the router applies the choice to the host's value.
     """
-    family = family_for(model_id)
+    family = family_for(model_id) if families else None
     if family is None:
         return (str(effort or "").strip().lower() or None) if unknown == "pass" else None
     return clamp(effort, family.accepted, family.overrides)
 
 
-def is_omitted(model_id: Optional[str], effort: Optional[str], unknown: str = "keep") -> bool:
+def is_omitted(model_id: Optional[str], effort: Optional[str], unknown: str = "omit", families: bool = True) -> bool:
     """True when the router would not write a reasoning-effort field."""
-    return resolve_effort(model_id, effort, unknown) is None
+    return resolve_effort(model_id, effort, unknown, families) is None

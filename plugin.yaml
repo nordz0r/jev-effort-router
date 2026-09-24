@@ -1,11 +1,11 @@
 name: jev-effort-router
-version: 0.3.0-ocx
+version: 0.3.0+ocx
 manifest_version: 2
 api_version: 1
 description: Route each user turn to the best model and reasoning effort via TypeSafe Jev's decision endpoint. Routes Ollama:Cloud by default, or any configured OpenAI-compatible provider such as an OpenCodex (ocx) endpoint with provider/model and combo/<id> ids.
-author: AlphaPerseii3000
+author: "AlphaPerseii3000 (ocx fork: nordz0r)"
 license: MIT
-homepage: https://github.com/AlphaPerseii3000/jev-effort-router
+homepage: https://github.com/nordz0r/jev-effort-router
 tags: [routing, models, reasoning, ollama-cloud, ocx, decisions]
 # ``provides_middleware`` is not in the host's ``_KNOWN_MANIFEST_FIELDS``, so declaring it emits an
 # "unknown manifest field(s) ignored" warning on every load. It is declared anyway, deliberately:
@@ -25,9 +25,9 @@ provides_tools:
   - jev_effort_router_status
   - jev_effort_router_route
 requires_env:
-  - name: OPENROUTER_API_KEY
-    description: OpenRouter API key - Jev is reached through OpenRouter's Decisions API.
-    url: https://openrouter.ai/settings/keys
+  - name: TYPESAFE_API_KEY
+    description: TypeSafe API key for Jev (default backend). With backend openrouter, set OPENROUTER_API_KEY instead (or name any variable via api_key_env).
+    url: https://typesafe.ai
     secret: true
 config_schema:
   enabled:
@@ -35,16 +35,38 @@ config_schema:
     default: true
     label: Routing enabled
     description: Master switch. When off, the plugin registers but never rewrites a request.
+  mode:
+    type: str
+    default: route
+    choices: [route, shadow]
+    label: Mode
+    description: route rewrites the request; shadow asks Jev and writes the decision to the audit log without changing the request.
+  backend:
+    type: str
+    default: typesafe
+    choices: [typesafe, openrouter]
+    label: Jev backend
+    description: typesafe calls https://api.typesafe.ai/v1/systemone; openrouter calls OpenRouter's Decisions API.
+  endpoint:
+    type: str
+    default: null
+    label: Decision endpoint
+    description: Override the backend's endpoint URL. Empty uses the backend default.
+  api_key_env:
+    type: str
+    default: null
+    label: API key variable
+    description: Name of the env variable holding the key (read through the profile's secret scope). Empty uses TYPESAFE_API_KEY or OPENROUTER_API_KEY per backend.
   jev_model:
     type: str
-    default: typesafe/jev-1.13
+    default: null
     label: Jev model
-    description: Decision model id. Use typesafe/jev-latest to follow the newest Jev release.
+    description: Decision model id. Empty uses jev-1.13.0 (typesafe) or typesafe/jev-1.13 (openrouter).
   confidence_threshold:
     type: float
     default: 0.5
     label: Confidence threshold
-    description: Below this, the turn keeps the statically configured model and effort.
+    description: Below this, the more capable of Jev's choice and default_model (by grid order) is used; with no default_model the configured model is kept.
   timeout_s:
     type: float
     default: 2.0
@@ -52,9 +74,9 @@ config_schema:
     description: Budget for the decision call. Any timeout leaves the request untouched.
   default_model:
     type: str
-    default: deepseek-v4.1-flash
+    default: ''
     label: Fallback model
-    description: Model used when the decision is below the confidence threshold.
+    description: Grid model used below the confidence threshold, on an unclear answer, and when Jev is unavailable. Empty keeps the configured model.
   default_effort:
     type: str
     default: medium
@@ -94,12 +116,12 @@ config_schema:
     type: list
     default: null
     label: Routed providers
-    description: Hermes provider names whose requests are routed. Empty keeps the default (ollama-cloud).
+    description: Hermes provider names whose requests are routed. Unset keeps the default (ollama-cloud); an explicit empty list routes none. The "custom" prefix is ignored, so custom-colon-ocx and ocx are equal.
   routed_base_urls:
     type: list
     default: null
     label: Routed base URLs
-    description: Also route any request whose base_url starts with one of these (e.g. an ocx endpoint).
+    description: Also route requests whose base_url equals one of these or continues it after a slash. A request with no provider name is never routed.
   catalog_check:
     type: bool
     default: true
@@ -107,7 +129,7 @@ config_schema:
     description: Refuse a decision naming a model missing from Hermes' Ollama:cloud model cache. Applies to ollama-cloud only; for other providers the grid is the allowlist.
   unknown_effort:
     type: str
-    default: keep
-    choices: [keep, omit, pass]
+    default: omit
+    choices: [omit, keep, pass]
     label: Effort for unknown model families
-    description: 'For combo/<id> and unrecognised provider/model ids: keep the request''s reasoning_effort, omit it, or pass Jev''s level through.'
+    description: 'For combo/<id> and unrecognised provider/model ids: omit reasoning_effort (default), keep the request''s value if it is low/medium/high, or pass Jev''s level through.'

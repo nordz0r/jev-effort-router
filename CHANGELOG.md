@@ -4,21 +4,36 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.3.0-ocx] - 2026-09-25
+## [0.3.0+ocx] - 2026-09-25
 
 ### Added
 
-- Routing on any configured provider, e.g. a single OpenCodex (ocx) endpoint: `routed_providers` and
-  `routed_base_urls` replace the hardcoded `ollama-cloud` gate (still the default).
-- Grid ids may be `provider/model` or `combo/<id>`; `"id: description"` now splits on `": "` first, so
-  ids containing a colon survive.
-- `unknown_effort` (`keep`/`omit`/`pass`) for `combo/<id>` and unrecognised `provider/model` ids.
-- `catalog_check`; the Ollama:cloud model cache is only consulted for the `ollama-cloud` provider.
+- Routing on any configured provider, e.g. an OpenCodex (ocx) `custom_providers` entry:
+  `routed_providers` (the `custom:` prefix is ignored; unset = `ollama-cloud`, `[]` = none) and
+  `routed_base_urls` (boundary match). A bare `custom` provider is resolved to its entry name by
+  `base_url`, so `custom:ocx` is routed and `custom:zai` is not. An empty provider name is never routed.
+- `mode: shadow | route`. Shadow asks Jev and audits the decision (`event: "shadow"`) without changing
+  the request; it honours every gate and the per-turn cache.
+- `backend: typesafe` (default, `https://api.typesafe.ai/v1/systemone`, `jev-1.13.0`,
+  `TYPESAFE_API_KEY`) and `backend: openrouter`; `endpoint`, `jev_model` and `api_key_env` overridable.
+  One retry on HTTP 429/529 inside `timeout_s`.
+- The API key is read through Hermes' `get_secret` (per-profile secret scope under multiplexing).
+- Grid ids may be `provider/model` or `combo/<id>`; entries split on `": "` (ids with a colon survive)
+  and may be one-key YAML maps; ids with an empty segment are rejected.
+- `unknown_effort` (`omit` default / `keep` / `pass`) for non-Ollama routes.
+- `catalog_check`; the Ollama cache and effort families apply only to Ollama providers.
 
 ### Changed
 
-- A below-threshold decision whose `default_model` is not on the grid now leaves the request untouched
-  instead of sending an id the provider may not have.
+- Model question: "least capable tier that still completes the task", description-only options plus
+  `unclear` (→ `default_model`). State is `user_message`, `user_message_chars`, `recent_context`
+  (surface and provider removed). Effort is a Score (low/medium/high), rounded.
+- Below threshold the more capable of (choice, `default_model`) by grid order is used; list the grid
+  least capable first. With no `default_model` the request is untouched.
+- Jev unavailable (timeout / HTTP error / malformed) falls back to `default_model` when it is on the grid.
+- `default_model` defaults to `""`.
+- A turn that could not be decided is remembered for that turn only, so its tool loop does not repeat
+  the failed Jev call.
 
 ## [0.2.0] - 2026-09-23
 

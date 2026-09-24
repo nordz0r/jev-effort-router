@@ -14,6 +14,11 @@ Every other routing entry in the catalog picks a **model** and stops there. The 
 reasoning effort make you move it **by hand** from the status bar. Nothing else decides both
 automatically, per turn.
 
+> **ocx fork (`0.3.0+ocx`).** This fork also routes any OpenAI-compatible provider you name — e.g. an
+> OpenCodex (ocx) endpoint configured as a Hermes `custom_providers` entry — and calls Jev on TypeSafe's
+> native API by default. See [Routing on an OpenCodex (ocx) endpoint](#routing-on-an-opencodex-ocx-endpoint).
+> The Ollama:Cloud text below describes the default configuration.
+
 **Scope: this plugin is for Hermes running on Ollama:Cloud.** Its whole routing grid is six Ollama:Cloud
 models, the per-family effort table is written for Ollama:Cloud's reasoning-effort vocabulary, and the
 middleware routes **only** the `ollama-cloud` provider — every other provider passes through untouched, so
@@ -77,18 +82,25 @@ hermes plugins install AlphaPerseii3000/jev-effort-router --force
 
 To skip the scan entirely for this repository, set `plugins.scan_on_install` in your Hermes config.
 
-Then set the key Jev is reached with — OpenRouter serves the Decisions API, so no separate TypeSafe
-credential is needed:
+Then set the key Jev is reached with. The default backend is TypeSafe's native API
+(`https://api.typesafe.ai/v1/systemone`, model `jev-1.13.0`); `backend: openrouter` uses OpenRouter's
+Decisions API (`typesafe/jev-1.13`) instead:
 
 ```bash
-# in the Hermes .env file
-OPENROUTER_API_KEY=sk-or-...
+# in the Hermes .env file (the profile's .env under multiplexing)
+TYPESAFE_API_KEY=...          # backend: typesafe (default)
+# OPENROUTER_API_KEY=...      # backend: openrouter
 ```
+
+The key is read through Hermes' `agent.secret_scope.get_secret(name)`. Under gateway multiplexing each
+profile's `.env` is installed as a per-request secret scope, so every profile uses **its own** key;
+in that mode `os.environ` is deliberately *not* a fallback, and an unscoped read makes the router inert
+for that request rather than borrowing another profile's key. `api_key_env` names a different variable.
 
 Restart the session. That is the whole setup: the six-model grid ships as the default.
 
 Requirements: **Hermes Agent on Ollama:Cloud** (`provider: ollama-cloud` — no other provider is routed),
-with the `llm_request` middleware kind (0.21.4 or newer), Python 3.11+, and prepaid OpenRouter credits.
+with the `llm_request` middleware kind (verified on 0.21.2 / v2026.9.11; the catalog lists 0.21.4), Python 3.11+, and TypeSafe (or OpenRouter) credits.
 
 ## Verify it is working
 
@@ -139,57 +151,105 @@ form generated from `plugin.yaml`.
 | Setting | Default | Meaning |
 |---|---|---|
 | `enabled` | `true` | Master switch. Off registers the plugin but never rewrites a request. |
-| `jev_model` | `typesafe/jev-1.13` | Decision model. `typesafe/jev-latest` follows the newest release. |
-| `confidence_threshold` | `0.5` | Below this, the turn keeps the configured model and effort. |
-| `timeout_s` | `2.0` | Budget for the decision call. Any timeout leaves the request untouched. |
-| `default_model` | `deepseek-v4.1-flash` | Model used when the decision is below threshold. |
-| `default_effort` | `medium` | Effort used when the decision is below threshold. |
+| `mode` | `route` | `route` rewrites the request. `shadow` asks Jev and writes the decision to the audit log (`event: "shadow"`) but never changes the request. |
+| `backend` | `typesafe` | `typesafe` (native API) or `openrouter` (Decisions API). |
+| `endpoint` | per backend | `https://api.typesafe.ai/v1/systemone` / `https://openrouter.ai/api/alpha/decisions`. |
+| `api_key_env` | per backend | `TYPESAFE_API_KEY` / `OPENROUTER_API_KEY`. Name only — never the key itself. |
+| `jev_model` | per backend | `jev-1.13.0` / `typesafe/jev-1.13`. On `typesafe`, `typesafe/jev-1.13` is mapped to `jev-1.13.0`. |
+| `confidence_threshold` | `0.5` | Below this, the more capable of Jev's choice and `default_model` (by grid order) is used; with no `default_model` the configured model is kept. |
+| `timeout_s` | `2.0` | Budget for the decision call, including one retry on HTTP 429/529. |
+| `default_model` | `""` | Grid id used below threshold, on an `unclear` answer, and when Jev is unavailable. Empty keeps the configured model. |
+| `default_effort` | `medium` | Effort used with the fallback model. |
 | `context_turns` | `4` | Preceding turns sent to Jev as recent context. |
 | `route_per_turn` | `true` | Off routes once per session instead of once per user turn. |
 | `audit_enabled` | `true` | Append one JSONL record per turn under the plugin data directory. |
 | `log_skips` | `true` | Record why a turn was left unrouted. |
 | `include_user_message_in_audit` | `false` | Off keeps conversation content out of the audit. |
-| `grid` | `null` | Optional `["model-id: description", ...]` replacing the built-in grid. |
-| `routed_providers` | `[ollama-cloud]` | Hermes provider names whose requests are routed. |
-| `routed_base_urls` | `[]` | Also route requests whose `base_url` starts with one of these. |
-| `catalog_check` | `true` | Check decisions against Hermes' Ollama:cloud model cache (ollama-cloud only). |
-| `unknown_effort` | `keep` | `combo/<id>` and unrecognised `provider/model` ids: `keep` the request's `reasoning_effort`, `omit` it, or `pass` Jev's level. |
+| `grid` | `null` | Optional list replacing the built-in grid: `"model-id: description"` strings or one-key maps `{model-id: description}`. **List it least capable first** — that order is the tier order. |
+| `routed_providers` | `[ollama-cloud]` | Hermes provider names whose requests are routed. The `custom:` prefix is ignored (`custom:ocx` = `ocx`). Unset = default; `[]` = none. |
+| `routed_base_urls` | `[]` | Also route requests whose `base_url` equals an entry or continues it after `/`. A request with an empty provider name is never routed. |
+| `catalog_check` | `true` | Check decisions against Hermes' Ollama:cloud model cache (Ollama providers only). |
+| `unknown_effort` | `omit` | Effort off Ollama (and for `combo/<id>` or unknown ids): `omit` drops `reasoning_effort`; `keep` keeps the request's value only if it is `low`/`medium`/`high`; `pass` sends Jev's level (and drops the host value when Jev gave none). |
 
 ### Routing on an OpenCodex (ocx) endpoint
 
-ocx is one OpenAI-compatible endpoint that takes `provider/model` and `combo/<id>` model ids. Point the
-router at whatever Hermes provider name (or base URL) your deployment uses for it, and replace the grid —
-the grid is the allowlist, so only ids you list can be chosen, and the Ollama:cloud cache is not consulted.
-The configured session model must itself be one of the grid ids, or the turn is left alone.
+ocx is one OpenAI-compatible endpoint that takes `provider/model` and `combo/<id>` ids. In Hermes it is a
+`custom_providers` entry selected as `provider: custom:ocx`.
+
+**What the middleware actually sees.** For every `custom_providers` entry Hermes resolves the runtime as
+`provider="custom"` plus that entry's `base_url` (`hermes_cli/runtime_provider_custom.py`, `_custom_runtime`);
+the `custom:ocx` string is not passed to middleware. The router therefore maps a bare `custom` back to the
+entry name by matching `base_url` against `get_compatible_custom_providers()`, then compares names with the
+`custom:` prefix stripped. `custom:ocx` is routed; `custom:zai` (another entry, another `base_url`) is not.
+
+**Recommended first install: shadow.** Install with `mode: shadow`, collect 20–50 real turns, read the
+audit (`hermes jev-effort-router tail 50`: `model`, `effort`, `model_confidence`, `fallback_reasons`,
+`configured_model`), then switch to `mode: route`. Shadow respects every skip gate and the per-turn cache,
+and never raises.
+
+Example — profile `nord`. Install the plugin into `profiles/nord/plugins/jev-effort-router/` and add it
+to `plugins.enabled` in the nord profile config:
 
 ```yaml
 plugins:
+  enabled: [jev-effort-router]
   entries:
     jev-effort-router:
       settings:
-        routed_providers: [my-ocx]                    # your Hermes provider name for ocx
-        # routed_base_urls: ["https://ocx.example.invalid/v1"]   # or match by endpoint
-        default_model: deepseek/deepseek-v4.1-flash   # must be a grid id
-        unknown_effort: keep
-        grid:
-          - "deepseek/deepseek-v4.1-flash: the usual choice for general work, everyday writing and ordinary coding"
-          - "anthropic/claude-sonnet-4.5: strongest at complex code and long agentic tasks"
-          - "combo/fast: trivial single-step requests only"
+        mode: shadow                      # collect 20-50 real turns, then switch to: route
+        routed_providers: [custom:ocx]    # custom:zai and every other provider stay untouched
+        backend: typesafe
+        api_key_env: TYPESAFE_API_KEY     # in profiles/nord/.env; read via the profile secret scope
+        default_model: combo/glm-grok-failover
+        default_effort: medium
+        unknown_effort: omit
+        grid:                             # least capable first: grid order is the tier order
+          - "combo/fast: trivial request answered in one short step with no investigation: greeting or thanks,
+            a one-line factual question, translating a sentence, fixing a named typo or renaming one string
+            at a given place"
+          - "gldf-flash: bounded task needing some judgment: write or change code in one or two files, explain
+            an error from a short log or traceback, write tests or a script, search or summarise a pasted
+            document, run a known sequence of tool commands"
+          - "combo/glm-grok-failover: hard or open-ended task where a mistake is costly: architecture or
+            migration design, refactoring across several modules, root-cause debugging of intermittent or
+            production failures, reasoning across several long files, or a short follow-up that continues
+            such a task from recent_context"
 ```
 
-Effort is clamped per model family after stripping the `provider/` prefix (`deepseek/deepseek-v4.1-flash`
-→ DeepSeek's ladder). Grid descriptions are what Jev weighs; the built-in ones were measured on Ollama:cloud,
-so descriptions for your own grid are unmeasured until you check the audit log.
+Notes on this example:
+
+- `combo/glm-grok-failover` **must be created on the ocx hub first**, as a failover combo `xai/glm-5.3`
+  → `xai/grok-4.7`. Until it exists, use `xai/glm-5.3` in its place — both as the grid entry and as
+  `default_model: xai/glm-5.3` (one line each).
+- `combo/fast` is an example id; replace it with a fast id that exists on your hub. A stronger tier
+  (e.g. `xai/grok-4.7` or a `gpt-6-*` id) can be appended *after* the combo entry. All ids are examples.
+- Descriptions are the tier criteria from Jev's own evaluation (`fast` / `general` / `strong`), mapped onto
+  ocx ids; they are not re-measured on this deployment.
+- **Exact id match.** The session's configured model (`model.default`, here `gldf-flash`) must equal a grid
+  id exactly, or the turn is left alone. Jev's answer is mapped back to the grid by position, never by name.
+
+How the decision is made off Ollama:
+
+- The model question asks for the **least capable tier that still completes the task**; options are the
+  descriptions only (no model ids) plus an `unclear` option, which resolves to `default_model`.
+- State sent to Jev: `user_message`, `user_message_chars`, `recent_context`.
+- Effort is a Score over low/medium/high, rounded; effort families and the Ollama catalog apply only to
+  Ollama providers. Elsewhere `unknown_effort` decides (default `omit`).
+- Below `confidence_threshold`: the more capable of (choice, `default_model`) by grid order — a
+  distrusted answer never downgrades below the fallback. No `default_model` → request untouched.
+- Jev unavailable (timeout, HTTP error, malformed answer): `default_model` at `default_effort` if it is on
+  the grid, else untouched. A missing key never calls Jev and leaves the request untouched.
 
 ## How it behaves when things go wrong
 
-The router is built to be invisible when it fails. A timeout, an HTTP error, a malformed answer, a
-confidence below the threshold, an unknown provider, or a model outside the grid all leave the request
-**exactly** as it was — a broken router is indistinguishable from a router that is not installed.
+The router is built to be invisible when it fails. An unknown provider, a model outside the grid, a missing
+key or any internal exception leave the request **exactly** as it was. A timeout, an HTTP error or a
+malformed answer does the same unless `default_model` is set and on the grid, in which case the turn goes
+to that fallback (recorded with its `fallback_reasons`).
 
 Notably, it touches only what it owns:
 
-- **Provider** — only `ollama-cloud` is routed; any other provider passes through untouched.
+- **Provider** — only `routed_providers` / `routed_base_urls` are routed (default `ollama-cloud`); any other provider passes through untouched.
 - **API mode** — only `chat_completions`; a Responses or Anthropic-Messages route is left alone.
 - **Model** — a model outside the configured grid is not routed.
 - **Auxiliary calls** — titling, compression, MoA and vision calls are not routed, only the main turn.

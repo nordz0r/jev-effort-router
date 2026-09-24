@@ -33,8 +33,9 @@ class Entry:
 
     @property
     def criterion(self) -> str:
-        """The exact string Jev sees for this option."""
-        return f"{self.model_id}: {self.description}" if self.description else self.model_id
+        """The exact string Jev sees for this option: the task description only. The model id
+        is not sent — Jev judges the task, and code maps the chosen option back to the id."""
+        return self.description or self.model_id
 
 
 #: The six benchmarked Ollama:cloud models, in the order they are offered to Jev.
@@ -79,21 +80,40 @@ DEFAULT_GRID: Tuple[Entry, ...] = (
 )
 
 
+def valid_model_id(model_id: str) -> bool:
+    """No empty path segment: ``combo/``, ``moonshot/``, ``/x`` and ``a//b`` are not ids."""
+    return bool(model_id) and all(segment.strip() for segment in model_id.split("/"))
+
+
 def parse_entry(raw: Any) -> Optional[Entry]:
-    """Parse ``"model-id: description"`` (or a ``{model_id, description}`` mapping)."""
+    """Parse ``"model-id: description"``, a ``{model_id, description}`` mapping, or a one-key
+    ``{model-id: description}`` mapping (what unquoted YAML ``- combo/fast: trivial`` yields).
+
+    A string splits on ``": "``; failing that, on the first ``":"`` only when the rest reads
+    like a description (has a space), so ``openrouter/qwen/qwen3-coder:free`` stays one id.
+    """
     if isinstance(raw, dict):
-        model_id = str(raw.get("model_id") or raw.get("model") or raw.get("id") or "").strip()
-        description = str(raw.get("description") or raw.get("profile") or "").strip()
-        return Entry(model_id, description) if model_id else None
+        if any(key in raw for key in ("model_id", "model", "id")):
+            model_id = str(raw.get("model_id") or raw.get("model") or raw.get("id") or "").strip()
+            description = str(raw.get("description") or raw.get("profile") or "").strip()
+        elif len(raw) == 1:
+            key, value = next(iter(raw.items()))
+            model_id, description = str(key or "").strip(), str(value or "").strip()
+        else:
+            return None
+        return Entry(model_id, description) if valid_model_id(model_id) else None
     text = str(raw or "").strip()
     if not text:
         return None
-    # Prefer ": " so an id carrying a colon (``nemotron-3-nano:30b``) survives a description.
-    model_id, separator, description = text.partition(": " if ": " in text else ":")
+    if ": " in text:
+        model_id, _, description = text.partition(": ")
+    else:
+        head, _, tail = text.partition(":")
+        model_id, description = (head, tail) if " " in tail.strip() else (text, "")
     model_id = model_id.strip()
-    if not model_id:
+    if not valid_model_id(model_id):
         return None
-    return Entry(model_id, description.strip() if separator else "")
+    return Entry(model_id, description.strip())
 
 
 def parse_grid(raw: Any) -> Tuple[Entry, ...]:

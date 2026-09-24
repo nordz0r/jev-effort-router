@@ -15,7 +15,7 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 from .grid import DEFAULT_GRID, Entry, parse_grid
 
 #: Hermes provider names of Ollama:cloud. Routed by default, and the only provider whose model
-#: cache (``catalog.py``) is consulted before a decision is acted on.
+#: cache (``catalog.py``) and per-family effort table (``effort.py``) apply.
 OLLAMA_PROVIDERS: Tuple[str, ...] = ("ollama-cloud", "ollama_cloud")
 
 #: Providers routed when ``routed_providers`` is not configured. Anything else is skipped untouched.
@@ -27,20 +27,36 @@ ROUTED_API_MODES = ("chat_completions",)
 
 EFFORT_LEVELS: Tuple[str, ...] = ("low", "medium", "high")
 
-DEFAULT_JEV_MODEL = "typesafe/jev-1.13"
-DEFAULT_ENDPOINT = "https://openrouter.ai/api/alpha/decisions"
+#: Decision backends: TypeSafe's own System One API (default) or OpenRouter's Decisions API.
+#: Same request/answer shape (``docs/jev-decisions-api.md``); endpoint, model id and key differ.
+BACKENDS: Dict[str, Dict[str, str]] = {
+    "typesafe": {
+        "endpoint": "https://api.typesafe.ai/v1/systemone",
+        "jev_model": "jev-1.13.0",
+        "api_key_env": "TYPESAFE_API_KEY",
+    },
+    "openrouter": {
+        "endpoint": "https://openrouter.ai/api/alpha/decisions",
+        "jev_model": "typesafe/jev-1.13",
+        "api_key_env": "OPENROUTER_API_KEY",
+    },
+}
+DEFAULT_BACKEND = "typesafe"
+DEFAULT_JEV_MODEL = BACKENDS[DEFAULT_BACKEND]["jev_model"]
+DEFAULT_ENDPOINT = BACKENDS[DEFAULT_BACKEND]["endpoint"]
 DEFAULT_TIMEOUT_S = 2.0
 DEFAULT_CONFIDENCE_THRESHOLD = 0.5
-DEFAULT_MODEL = "deepseek-v4.1-flash"
+#: Empty: a below-threshold decision keeps the configured model (never a silent downgrade).
+DEFAULT_MODEL = ""
 DEFAULT_EFFORT = "medium"
 DEFAULT_CONTEXT_TURNS = 4
 
-#: What to do with ``reasoning_effort`` when the chosen model has no known effort family
-#: (``combo/<id>``, or a ``provider/model`` id outside ``effort.py``'s table):
-#: ``keep`` leaves the request's value as Hermes built it, ``omit`` drops the field, ``pass``
-#: sends Jev's low/medium/high verbatim.
-UNKNOWN_EFFORT_MODES: Tuple[str, ...] = ("keep", "omit", "pass")
-DEFAULT_UNKNOWN_EFFORT = "keep"
+#: What to do with ``reasoning_effort`` when no effort family applies (every non-Ollama route,
+#: and ``combo/<id>``): ``omit`` drops the field, ``keep`` keeps the host's value only when it is
+#: low/medium/high (anything else is dropped), ``pass`` sends Jev's level verbatim (and drops
+#: the host's value when Jev gave none).
+UNKNOWN_EFFORT_MODES: Tuple[str, ...] = ("omit", "keep", "pass")
+DEFAULT_UNKNOWN_EFFORT = "omit"
 
 
 def _as_bool(value: Any, default: bool) -> bool:
@@ -92,17 +108,24 @@ def _as_text(value: Any, default: str) -> str:
 
 
 def _as_list(value: Any, default: Tuple[str, ...]) -> Tuple[str, ...]:
-    """A list setting, also accepted as a comma-separated string; empty means ``default``."""
+    """A list setting, also accepted as a comma-separated string. Unset (``None``) or garbage
+    means ``default``; an explicit empty list means empty."""
     if isinstance(value, str):
         value = value.split(",")
     if not isinstance(value, (list, tuple)):
         return default
-    items = tuple(text for text in (str(item).strip() for item in value) if text)
-    return items or default
+    return tuple(text for text in (str(item).strip() for item in value) if text)
 
 
 def _norm_url(url: Any) -> str:
     return str(url or "").strip().rstrip("/").lower()
+
+
+def norm_provider(name: Any) -> str:
+    """Canonical provider name: ``custom:ocx`` and ``ocx`` compare equal (Hermes' own
+    custom-provider normalisation: lower-case, spaces to dashes)."""
+    text = str(name or "").strip().lower().replace(" ", "-")
+    return text[len("custom:"):] if text.startswith("custom:") else text
 
 
 @dataclass(frozen=True)
@@ -126,27 +149,31 @@ class Settings:
     routed_base_urls: Tuple[str, ...] = ()
     catalog_check: bool = True
     unknown_effort: str = DEFAULT_UNKNOWN_EFFORT
+    backend: str = DEFAULT_BACKEND
+    mode: str = "route"
+    api_key_env: str = BACKENDS[DEFAULT_BACKEND]["api_key_env"]
 
-    def routes(self, provider: str, base_url: str = "") -> bool:
-        """Whether a request to this provider / endpoint is the router's to rewrite.
-
-        An empty provider name counts as routed (the host did not say). ``routed_base_urls``
-        entries match the request's ``base_url`` as a prefix, trailing slash and case ignored.
-        """
-        name = (provider or "").strip().lower()
-        if not name or name in {item.lower() for item in self.routed_providers}:
-            return True
-        url = _norm_url(base_url)
-        return bool(url) and any(url.startswith(_norm_url(item)) for item in self.routed_base_urls)
-
-    def checks_catalog(self, provider: str) -> bool:
-        """The Ollama:cloud model cache only speaks for Ollama:cloud; for any other provider
-        (ocx included) the grid itself is the allowlist. An unnamed provider counts as
-        Ollama:cloud only while Ollama:cloud is among the routed providers."""
-        name = (provider or "").strip().lower()
+    def match(self, provider: Any, base_url: Any = "") -> Optional[str]:
+        """How a request is the router's to rewrite: ``"provider"`` (its provider name is in
+        ``routed_providers``, ``custom:`` prefix ignored on both sides), ``"base_url"`` (its
+        base_url equals a ``routed_base_urls`` entry or sits under it at a path boundary), or
+        ``None`` (not routed; the request goes out untouched). An empty provider is never routed."""
+        name = norm_provider(provider)
         if not name:
-            return self.catalog_check and any(item.lower() in OLLAMA_PROVIDERS for item in self.routed_providers)
-        return self.catalog_check and name in OLLAMA_PROVIDERS
+            return None  # a request that does not say where it goes is never rewritten
+        if name in {norm_provider(item) for item in self.routed_providers}:
+            return "provider"
+        url = _norm_url(base_url)
+        for item in self.routed_base_urls:
+            prefix = _norm_url(item)
+            if url and prefix and (url == prefix or url.startswith(prefix + "/")):
+                return "base_url"
+        return None
+
+    def is_ollama(self, provider: Any, how: Optional[str]) -> bool:
+        """Ollama:cloud semantics (model-cache check, effort families) apply only to a request
+        matched by an Ollama:cloud provider name — never to one matched by base_url."""
+        return how == "provider" and norm_provider(provider) in OLLAMA_PROVIDERS
 
     @property
     def grid_ids(self) -> Tuple[str, ...]:
@@ -164,13 +191,15 @@ def load_settings(get_config: Optional[Callable[..., Any]] = None) -> Settings:
     """Build a :class:`Settings` from ``ctx.get_config`` (or from no config at all)."""
     read = get_config if callable(get_config) else (lambda _key, default=None: default)
 
+    backend = _as_choice(read("backend", DEFAULT_BACKEND), tuple(BACKENDS), DEFAULT_BACKEND)
+    defaults = BACKENDS[backend]
     raw_grid = read("grid", None)
     grid = parse_grid(raw_grid) if raw_grid else tuple(DEFAULT_GRID)
 
     settings = Settings(
         enabled=_as_bool(read("enabled", True), True),
-        jev_model=_as_text(read("jev_model", DEFAULT_JEV_MODEL), DEFAULT_JEV_MODEL),
-        endpoint=_as_text(read("endpoint", DEFAULT_ENDPOINT), DEFAULT_ENDPOINT),
+        jev_model=_jev_model(backend, _as_text(read("jev_model", None), defaults["jev_model"])),
+        endpoint=_as_text(read("endpoint", None), defaults["endpoint"]),
         confidence_threshold=_as_float(
             read("confidence_threshold", DEFAULT_CONFIDENCE_THRESHOLD),
             DEFAULT_CONFIDENCE_THRESHOLD,
@@ -192,22 +221,39 @@ def load_settings(get_config: Optional[Callable[..., Any]] = None) -> Settings:
         catalog_check=_as_bool(read("catalog_check", True), True),
         unknown_effort=_as_choice(read("unknown_effort", DEFAULT_UNKNOWN_EFFORT), UNKNOWN_EFFORT_MODES,
                                   DEFAULT_UNKNOWN_EFFORT),
+        backend=backend,
+        mode=_as_choice(read("mode", "route"), ("route", "shadow"), "route"),
+        api_key_env=_as_text(read("api_key_env", None), defaults["api_key_env"]),
     )
     return settings
 
 
-def api_key() -> str:
-    """The OpenRouter key, from the environment only.
+def _jev_model(backend: str, model: str) -> str:
+    """OpenRouter names Jev ``typesafe/jev-1.13``; TypeSafe's own API names the same model
+    ``jev-1.13.0`` (and takes aliases such as ``jev-latest`` as-is)."""
+    if backend == "typesafe" and model.startswith("typesafe/"):
+        model = model[len("typesafe/"):]
+        return "jev-1.13.0" if model == "jev-1.13" else model
+    return model
 
-    Never read from ``config.yaml`` and never returned anywhere it could be logged.
+
+def api_key(settings: Optional["Settings"] = None) -> str:
+    """The decision backend's key, by the env-var name ``api_key_env`` names.
+
+    Read through Hermes' profile-scoped secret lookup (``host.secret``), so a multiplexed
+    gateway serves each profile its own ``<profile>/.env`` value. Never read from
+    ``config.yaml`` and never returned anywhere it could be logged.
     """
-    return (os.environ.get("OPENROUTER_API_KEY") or "").strip()
+    from .host import secret
+
+    name = settings.api_key_env if settings is not None else BACKENDS[DEFAULT_BACKEND]["api_key_env"]
+    return secret(name)
 
 
-def redact(value: Any, limit: int = 200) -> str:
+def redact(value: Any, limit: int = 200, settings: Optional["Settings"] = None) -> str:
     """Render a value for a log line with any credential-looking substring removed."""
     text = str(value)
-    key = api_key()
+    key = api_key(settings)
     if key:
         text = text.replace(key, "[REDACTED]")
     if len(text) > limit:
