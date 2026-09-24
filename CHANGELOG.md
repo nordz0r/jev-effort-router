@@ -23,6 +23,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 - `unknown_effort` (`omit` default / `keep` / `pass`) for non-Ollama routes.
 - `catalog_check`; the Ollama cache and effort families apply only to Ollama providers.
 
+- Per-model effort levels from config: grid entries may be maps `{id, description, efforts, context}`
+  (string form unchanged). With `efforts`, the decided level is rounded up on
+  `none < minimal < low < medium < high < xhigh < max < ultra` (strongest declared if nothing higher).
+- Context fit: prompt estimated as `ceil(chars/4)` over messages + tools; a model fits when
+  `context > estimate + context_reserve_tokens` (default 32000). Escalates up the grid, then to
+  `long_context_models`, else leaves the request untouched (`context_no_fit`). Runs on every request,
+  on fallbacks and in shadow.
+- README nord example: `default_model: gldf-hermes`, illustrative grid with context windows,
+  `zai/glm-5.3` as the direct glm id.
+
 ### Changed
 
 - Model question: "least capable tier that still completes the task", description-only options plus

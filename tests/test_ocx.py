@@ -208,7 +208,7 @@ def test_below_threshold_without_default_keeps_the_configured_model(tmp_path):
     assert ocx_route(router) is None
 
 
-COMBO_GRID = OCX_GRID + ["combo/glm-grok-failover: default: long agentic work"]
+COMBO_GRID = OCX_GRID + ["gldf-hermes: default: long agentic work"]
 
 
 @pytest.mark.parametrize(
@@ -221,12 +221,12 @@ COMBO_GRID = OCX_GRID + ["combo/glm-grok-failover: default: long agentic work"]
 )
 def test_combo_default_model_serves_every_fallback_path(tmp_path, payload):
     response = StubResponse(payload) if payload is not None else ReadTimeout("slow")
-    config = {**OCX, "grid": COMBO_GRID, "default_model": "combo/glm-grok-failover", "unknown_effort": "pass"}
+    config = {**OCX, "grid": COMBO_GRID, "default_model": "gldf-hermes", "unknown_effort": "pass"}
     router, _ = build(tmp_path, StubTransport([response]), config=config)
 
     result = ocx_route(router)
 
-    assert result["request"]["model"] == "combo/glm-grok-failover"
+    assert result["request"]["model"] == "gldf-hermes"
     # Combo: no effort family; `pass` sends Jev's level, or default_effort when Jev was down.
     assert result["request"]["reasoning_effort"] == ("high" if payload is not None else "medium")
 
@@ -289,8 +289,13 @@ def test_readme_nord_example_is_a_valid_configuration():
 
     assert settings.mode == "shadow" and settings.backend == "typesafe"
     assert settings.api_key_env == "TYPESAFE_API_KEY" and settings.jev_model == "jev-1.13.0"
-    assert [e.model_id for e in settings.grid] == ["combo/fast", "gldf-flash", "combo/glm-grok-failover"]
-    assert settings.entry_for(settings.default_model) is not None
+    assert [e.model_id for e in settings.grid] == ["gemini-3.8-flash", "gldf-flash", "gldf-hermes"]
+    assert settings.default_model == "gldf-hermes" and settings.entry_for("gldf-hermes").context == 500000
+    assert settings.grid[0].context == 1_000_000 and settings.grid[1].context is None
+    glm = settings.long_context_models[0]
+    assert glm.model_id == "zai/glm-5.3" and glm.efforts == ("low", "high", "max", "ultra")
+    assert settings.context_reserve_tokens == 32000
+    assert "glm-grok-failover" not in text and "xai/glm" not in text
     assert settings.match("custom:ocx") and not settings.match("custom:zai")
 
 
@@ -306,3 +311,199 @@ def test_a_failed_turn_is_not_retried_on_every_tool_call(tmp_path):
     # The next turn asks again.
     transport.responses.append(StubResponse(decision_payload("3", 0.9, "high", 0.9, grid_size=3)))
     assert ocx_route(router, turn_id="turn-2")["request"]["model"] == "xai/grok-4.7"
+
+
+# -- per-model effort levels ---------------------------------------------------------
+
+GLM = {"id": "zai/glm-5.3", "description": "hard task", "efforts": ["low", "high", "max", "ultra"], "context": 1000000}
+
+
+def test_map_form_entries_carry_efforts_and_context():
+    entry = parse_entry(GLM)
+    assert entry.efforts == ("low", "high", "max", "ultra") and entry.context == 1_000_000
+    nested = parse_entry({"zai/glm-5.3": {"description": "hard", "efforts": "high, low", "context": "1e6"}})
+    assert nested.efforts == ("low", "high") and nested.context == 1_000_000
+    # String form keeps working and declares nothing.
+    assert parse_entry("zai/glm-5.3: hard") == Entry("zai/glm-5.3", "hard")
+    assert parse_entry({"id": "x", "efforts": ["bogus"], "context": -1}) == Entry("x", "")
+
+
+@pytest.mark.parametrize(
+    "requested, supported, expected",
+    [
+        ("medium", ["low", "high", "max", "ultra"], "high"),  # glm: medium rounds UP to high
+        ("low", ["low", "high", "max", "ultra"], "low"),
+        ("high", ["low", "medium"], "medium"),                # nothing stronger: strongest supported
+        ("medium", ["none", "minimal"], "minimal"),           # never lands on none
+        (None, ["low", "high"], None),                        # no level requested: field omitted
+    ],
+)
+def test_round_up_onto_declared_levels(requested, supported, expected):
+    from effort import round_up
+
+    assert round_up(requested, supported) == expected
+
+
+def _glm_router(tmp_path, payload, **config):
+    grid = ["gldf-flash: bounded task", GLM]
+    return build(tmp_path, StubTransport([StubResponse(payload)]), config={**OCX, "grid": grid, **config})
+
+
+def test_declared_efforts_round_the_decided_level_up(tmp_path):
+    router, _ = _glm_router(tmp_path, decision_payload("2", 0.9, "medium", 0.9, grid_size=2))
+
+    result = ocx_route(router)
+
+    assert result["request"]["model"] == "zai/glm-5.3"
+    assert result["request"]["reasoning_effort"] == "high"
+
+
+def test_declared_efforts_win_over_keep(tmp_path):
+    router, _ = _glm_router(tmp_path, decision_payload("2", 0.9, "low", 0.9, grid_size=2), unknown_effort="keep")
+    request = ollama_request(model="gldf-flash")
+    request["reasoning_effort"] = "medium"
+
+    assert ocx_route(router, request)["request"]["reasoning_effort"] == "low"
+
+
+def test_absent_efforts_keep_the_unknown_effort_rules(tmp_path):
+    router, _ = build(tmp_path, StubTransport([StubResponse(decision_payload("3", 0.9, "medium", 0.9, grid_size=3))]),
+                      config=OCX)
+    result = ocx_route(router)
+    assert result["request"]["model"] == "xai/grok-4.7"
+    assert "reasoning_effort" not in result["request"]  # omit (default)
+
+
+def test_fallback_default_effort_is_rounded_up_too(tmp_path):
+    grid = ["gldf-flash: bounded task", GLM]
+    router, _ = build(tmp_path, StubTransport([ReadTimeout("slow")]),
+                      config={**OCX, "grid": grid, "default_model": "zai/glm-5.3", "default_effort": "medium"})
+
+    result = ocx_route(router)
+
+    assert result["request"]["model"] == "zai/glm-5.3" and result["request"]["reasoning_effort"] == "high"
+
+
+# -- context fit -----------------------------------------------------------------------
+
+FIT_GRID = [
+    {"id": "small", "description": "trivial", "context": 40000, "efforts": ["low", "high"]},
+    {"id": "mid", "description": "bounded", "context": 100000},
+    {"id": "big", "description": "hard", "context": 300000, "efforts": ["low", "high", "max"]},
+]
+FIT = {"routed_providers": ["custom:ocx"], "grid": FIT_GRID}
+
+
+def big_request(tokens, model="small"):
+    request = ollama_request(model=model)
+    request["messages"] = [{"role": "user", "content": "x" * (tokens * 4)}]
+    return request
+
+
+def test_estimate_is_chars_over_four_across_messages_and_tools():
+    from fit import estimate_tokens
+
+    request = {"messages": [{"role": "user", "content": "a" * 400}], "tools": [{"name": "t"}]}
+    import json as _json
+    chars = len(_json.dumps(request["messages"])) + len(_json.dumps(request["tools"]))
+    assert estimate_tokens(request) == -(-chars // 4)
+
+
+def test_a_model_that_does_not_fit_escalates_up_the_grid(tmp_path):
+    # Jev picks "small" (40k); a ~20k prompt + 32k reserve does not fit it -> "mid" (100k).
+    router, _ = build(tmp_path, StubTransport([StubResponse(decision_payload("1", 0.9, "medium", 0.9, grid_size=3))]),
+                      config={**FIT, "unknown_effort": "pass"})
+
+    result = ocx_route(router, big_request(20000), model="small")
+
+    assert result["request"]["model"] == "mid"
+    assert result["request"]["reasoning_effort"] == "medium"  # re-derived for mid (no efforts: pass)
+    record = records(tmp_path)[-1]
+    assert record["fallback_reasons"][-1] == "context_escalated"
+    assert record["context_from"] == "small" and record["context_estimate"] > 20000
+
+
+def test_escalation_skips_tiers_that_still_do_not_fit(tmp_path):
+    router, _ = build(tmp_path, StubTransport([StubResponse(decision_payload("1", 0.9, "medium", 0.9, grid_size=3))]),
+                      config=FIT)
+
+    result = ocx_route(router, big_request(150000), model="small")
+
+    assert result["request"]["model"] == "big"
+    assert result["request"]["reasoning_effort"] == "high"  # big declares efforts: medium -> high
+
+
+def test_long_context_models_when_no_grid_tier_fits(tmp_path):
+    config = {**FIT, "long_context_models": [{"id": "zai/glm-5.3", "context": 1000000, "efforts": ["low", "high", "max", "ultra"]}]}
+    router, _ = build(tmp_path, StubTransport([StubResponse(decision_payload("3", 0.9, "medium", 0.9, grid_size=3))]),
+                      config=config)
+
+    result = ocx_route(router, big_request(400000), model="small")
+
+    assert result["request"]["model"] == "zai/glm-5.3"
+    assert result["request"]["reasoning_effort"] == "high"
+    assert records(tmp_path)[-1]["fallback_reasons"][-1] == "context_long_model"
+
+
+def test_long_context_ids_take_their_window_from_the_grid(tmp_path):
+    router, settings = build(tmp_path, StubTransport([]), config={**FIT, "long_context_models": ["big"]})
+    assert settings.long_context_entry(settings.long_context_models[0]).context == 300000
+
+
+def test_nothing_fits_leaves_the_request_untouched(tmp_path):
+    router, _ = build(tmp_path, StubTransport([StubResponse(decision_payload("1", 0.9, "medium", 0.9, grid_size=3))]),
+                      config={**FIT, "long_context_models": [{"id": "zai/glm-5.3", "context": 200000}]})
+
+    assert ocx_route(router, big_request(400000), model="small") is None
+    record = records(tmp_path)[-1]
+    assert record["event"] == "skip" and record["reason"] == "context_no_fit"
+    assert record["context_estimate"] > 400000 and record["chosen_model"] == "small"
+
+
+def test_models_without_a_window_always_fit(tmp_path):
+    router, _ = build(tmp_path, StubTransport([StubResponse(decision_payload("3", 0.9, "medium", 0.9, grid_size=3))]),
+                      config=OCX)
+    assert ocx_route(router, big_request(5_000_000, model="gldf-flash"))["request"]["model"] == "xai/grok-4.7"
+
+
+def test_reserve_is_configurable(tmp_path):
+    router, _ = build(tmp_path, StubTransport([StubResponse(decision_payload("1", 0.9, "medium", 0.9, grid_size=3))]),
+                      config={**FIT, "context_reserve_tokens": 0})
+    assert ocx_route(router, big_request(30000), model="small")["request"]["model"] == "small"
+
+
+def test_fallback_path_is_context_checked(tmp_path):
+    router, _ = build(tmp_path, StubTransport([ReadTimeout("slow")]), config={**FIT, "default_model": "small"})
+
+    result = ocx_route(router, big_request(20000), model="small")
+
+    assert result["request"]["model"] == "mid"
+    assert records(tmp_path)[-1]["fallback_reasons"] == ["timeout", "context_escalated"]
+
+
+def test_context_is_rechecked_on_replay_as_the_prompt_grows(tmp_path):
+    transport = StubTransport([StubResponse(decision_payload("1", 0.9, "medium", 0.9, grid_size=3))])
+    router, _ = build(tmp_path, transport, config=FIT)
+
+    assert ocx_route(router, big_request(10), model="small")["request"]["model"] == "small"
+    assert ocx_route(router, big_request(20000), model="small", api_call_count=2)["request"]["model"] == "mid"
+    assert transport.call_count == 1
+
+
+def test_shadow_audits_the_escalation_without_rewriting(tmp_path):
+    router, _ = build(tmp_path, StubTransport([StubResponse(decision_payload("1", 0.9, "medium", 0.9, grid_size=3))]),
+                      config={**FIT, "mode": "shadow"})
+
+    assert ocx_route(router, big_request(20000), model="small") is None
+    record = records(tmp_path)[-1]
+    assert record["event"] == "shadow" and record["model"] == "mid"
+    assert record["context_from"] == "small" and "context_escalated" in record["fallback_reasons"]
+
+
+def test_shadow_audits_no_fit(tmp_path):
+    router, _ = build(tmp_path, StubTransport([StubResponse(decision_payload("1", 0.9, "medium", 0.9, grid_size=3))]),
+                      config={**FIT, "mode": "shadow"})
+
+    assert ocx_route(router, big_request(400000), model="small") is None
+    record = records(tmp_path)[-1]
+    assert record["reason"] == "context_no_fit" and record["mode"] == "shadow"

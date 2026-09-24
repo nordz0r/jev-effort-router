@@ -158,7 +158,10 @@ def _status(router, settings: Settings, recent: int = 5) -> str:
         "route_per_turn": settings.route_per_turn,
         "fallback": {"model": settings.default_model, "effort": settings.default_effort},
         "grid": [
-            {"model": entry.model_id, "profile": entry.description} for entry in settings.grid
+            {"model": entry.model_id, "profile": entry.description,
+             **({"efforts": list(entry.efforts)} if entry.efforts else {}),
+             **({"context": entry.context} if entry.context else {})}
+            for entry in settings.grid
         ],
         "audit": {
             "enabled": settings.audit_enabled,

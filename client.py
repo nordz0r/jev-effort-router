@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from .config import Settings, api_key, redact
-from .effort import resolve_effort
+from .effort import effort_for
 from .grid import Entry, resolve
 from .state import (
     EFFORT_QUESTION_ID,
@@ -226,7 +226,7 @@ class JevClient:
             return None
         return Decision(
             model=chosen.model_id,
-            effort=resolve_effort(chosen.model_id, settings.default_effort, settings.unknown_effort, effort_families),
+            effort=effort_for(chosen, settings.default_effort, settings.unknown_effort, effort_families),
             effort_requested=settings.default_effort,
             model_confidence=0.0,
             effort_confidence=0.0,
@@ -313,7 +313,7 @@ class JevClient:
         if requested is None and answered:
             requested = settings.default_effort
 
-        effort = resolve_effort(model, requested, settings.unknown_effort, effort_families)
+        effort = effort_for(chosen, requested, settings.unknown_effort, effort_families)
 
         alternatives = tuple(
             entry.model_id for entry in grid if entry.model_id != model

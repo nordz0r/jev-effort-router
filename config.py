@@ -12,7 +12,7 @@ import os
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
-from .grid import DEFAULT_GRID, Entry, parse_grid
+from .grid import DEFAULT_GRID, Entry, parse_entry, parse_grid
 
 #: Hermes provider names of Ollama:cloud. Routed by default, and the only provider whose model
 #: cache (``catalog.py``) and per-family effort table (``effort.py``) apply.
@@ -50,6 +50,8 @@ DEFAULT_CONFIDENCE_THRESHOLD = 0.5
 DEFAULT_MODEL = ""
 DEFAULT_EFFORT = "medium"
 DEFAULT_CONTEXT_TURNS = 4
+#: Tokens kept free for the answer (and estimate error) when checking a context window.
+DEFAULT_CONTEXT_RESERVE = 32000
 
 #: What to do with ``reasoning_effort`` when no effort family applies (every non-Ollama route,
 #: and ``combo/<id>``): ``omit`` drops the field, ``keep`` keeps the host's value only when it is
@@ -152,6 +154,8 @@ class Settings:
     backend: str = DEFAULT_BACKEND
     mode: str = "route"
     api_key_env: str = BACKENDS[DEFAULT_BACKEND]["api_key_env"]
+    context_reserve_tokens: int = DEFAULT_CONTEXT_RESERVE
+    long_context_models: Tuple[Entry, ...] = ()
 
     def match(self, provider: Any, base_url: Any = "") -> Optional[str]:
         """How a request is the router's to rewrite: ``"provider"`` (its provider name is in
@@ -178,6 +182,18 @@ class Settings:
     @property
     def grid_ids(self) -> Tuple[str, ...]:
         return tuple(entry.model_id for entry in self.grid)
+
+    def long_context_entry(self, item: Entry) -> Entry:
+        """A ``long_context_models`` item, completed from its grid entry when it only names an id."""
+        grid_entry = self.entry_for(item.model_id)
+        if grid_entry is None:
+            return item
+        return Entry(
+            item.model_id,
+            item.description or grid_entry.description,
+            item.efforts or grid_entry.efforts,
+            item.context or grid_entry.context,
+        )
 
     def entry_for(self, model_id: str) -> Optional[Entry]:
         wanted = (model_id or "").strip()
@@ -224,8 +240,20 @@ def load_settings(get_config: Optional[Callable[..., Any]] = None) -> Settings:
         backend=backend,
         mode=_as_choice(read("mode", "route"), ("route", "shadow"), "route"),
         api_key_env=_as_text(read("api_key_env", None), defaults["api_key_env"]),
+        context_reserve_tokens=_as_int(read("context_reserve_tokens", DEFAULT_CONTEXT_RESERVE),
+                                       DEFAULT_CONTEXT_RESERVE, minimum=0, maximum=10_000_000),
+        long_context_models=_entries(read("long_context_models", None)),
     )
     return settings
+
+
+def _entries(raw: Any) -> Tuple[Entry, ...]:
+    if isinstance(raw, (str, dict)):
+        raw = [raw]
+    if not isinstance(raw, (list, tuple)):
+        return ()
+    parsed = (parse_entry(item) for item in raw)
+    return tuple(entry for entry in parsed if entry is not None)
 
 
 def _jev_model(backend: str, model: str) -> str:

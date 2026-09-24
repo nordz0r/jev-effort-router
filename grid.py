@@ -30,6 +30,11 @@ class Entry:
     model_id: str
     #: Human-readable profile line, sent to Jev as the criterion description.
     description: str
+    #: Reasoning-effort levels this model accepts (config-driven, canonical ladder names).
+    #: ``None``: not declared — the family table / ``unknown_effort`` rules apply.
+    efforts: Optional[Tuple[str, ...]] = None
+    #: Context window in tokens. ``None``: unknown, treated as fitting any prompt.
+    context: Optional[int] = None
 
     @property
     def criterion(self) -> str:
@@ -85,9 +90,34 @@ def valid_model_id(model_id: str) -> bool:
     return bool(model_id) and all(segment.strip() for segment in model_id.split("/"))
 
 
+#: Canonical reasoning-effort ladder, weakest first (mirrors ``effort.LADDER``).
+_LADDER = ("none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra")
+
+
+def _efforts(raw: Any) -> Optional[Tuple[str, ...]]:
+    """Declared effort levels, lower-cased, ladder names only, in ladder order; ``None`` when
+    absent or when nothing usable is declared."""
+    if isinstance(raw, str):
+        raw = [item for item in raw.replace(",", " ").split()]
+    if not isinstance(raw, (list, tuple)):
+        return None
+    levels = {str(item).strip().lower() for item in raw}
+    ordered = tuple(level for level in _LADDER if level in levels)
+    return ordered or None
+
+
+def _context(raw: Any) -> Optional[int]:
+    try:
+        value = int(float(raw))
+    except (TypeError, ValueError):
+        return None
+    return value if value > 0 else None
+
+
 def parse_entry(raw: Any) -> Optional[Entry]:
-    """Parse ``"model-id: description"``, a ``{model_id, description}`` mapping, or a one-key
-    ``{model-id: description}`` mapping (what unquoted YAML ``- combo/fast: trivial`` yields).
+    """Parse ``"model-id: description"``, a ``{id, description, efforts, context}`` mapping, or
+    a one-key ``{model-id: description}`` mapping (what unquoted YAML ``- combo/fast: trivial``
+    yields) whose value may itself be a ``{description, efforts, context}`` mapping.
 
     A string splits on ``": "``; failing that, on the first ``":"`` only when the rest reads
     like a description (has a space), so ``openrouter/qwen/qwen3-coder:free`` stays one id.
@@ -95,13 +125,17 @@ def parse_entry(raw: Any) -> Optional[Entry]:
     if isinstance(raw, dict):
         if any(key in raw for key in ("model_id", "model", "id")):
             model_id = str(raw.get("model_id") or raw.get("model") or raw.get("id") or "").strip()
-            description = str(raw.get("description") or raw.get("profile") or "").strip()
+            fields = raw
         elif len(raw) == 1:
             key, value = next(iter(raw.items()))
-            model_id, description = str(key or "").strip(), str(value or "").strip()
+            model_id = str(key or "").strip()
+            fields = value if isinstance(value, dict) else {"description": value}
         else:
             return None
-        return Entry(model_id, description) if valid_model_id(model_id) else None
+        if not valid_model_id(model_id):
+            return None
+        description = str(fields.get("description") or fields.get("profile") or "").strip()
+        return Entry(model_id, description, _efforts(fields.get("efforts")), _context(fields.get("context")))
     text = str(raw or "").strip()
     if not text:
         return None

@@ -165,10 +165,12 @@ form generated from `plugin.yaml`.
 | `audit_enabled` | `true` | Append one JSONL record per turn under the plugin data directory. |
 | `log_skips` | `true` | Record why a turn was left unrouted. |
 | `include_user_message_in_audit` | `false` | Off keeps conversation content out of the audit. |
-| `grid` | `null` | Optional list replacing the built-in grid: `"model-id: description"` strings or one-key maps `{model-id: description}`. **List it least capable first** — that order is the tier order. |
+| `grid` | `null` | Optional list replacing the built-in grid: `"model-id: description"` strings, one-key maps, or `{id, description, efforts, context}` maps. **List it least capable first** — that order is the tier order. |
 | `routed_providers` | `[ollama-cloud]` | Hermes provider names whose requests are routed. The `custom:` prefix is ignored (`custom:ocx` = `ocx`). Unset = default; `[]` = none. |
 | `routed_base_urls` | `[]` | Also route requests whose `base_url` equals an entry or continues it after `/`. A request with an empty provider name is never routed. |
 | `catalog_check` | `true` | Check decisions against Hermes' Ollama:cloud model cache (Ollama providers only). |
+| `context_reserve_tokens` | `32000` | A model fits when its `context` exceeds the estimated prompt (chars/4 over messages + tools) plus this. |
+| `long_context_models` | `[]` | Tried in order (first that fits) when neither the chosen model nor a more capable grid entry fits. Grid ids or `{id, context, efforts}` maps. |
 | `unknown_effort` | `omit` | Effort off Ollama (and for `combo/<id>` or unknown ids): `omit` drops `reasoning_effort`; `keep` keeps the request's value only if it is `low`/`medium`/`high`; `pass` sends Jev's level (and drops the host value when Jev gave none). |
 
 ### Routing on an OpenCodex (ocx) endpoint
@@ -200,33 +202,84 @@ plugins:
         routed_providers: [custom:ocx]    # custom:zai and every other provider stay untouched
         backend: typesafe
         api_key_env: TYPESAFE_API_KEY     # in profiles/nord/.env; read via the profile secret scope
-        default_model: combo/glm-grok-failover
+        default_model: gldf-hermes        # existing ocx combo (failover zai/glm-5.3 -> xai/grok-4.7)
         default_effort: medium
         unknown_effort: omit
-        grid:                             # least capable first: grid order is the tier order
-          - "combo/fast: trivial request answered in one short step with no investigation: greeting or thanks,
-            a one-line factual question, translating a sentence, fixing a named typo or renaming one string
-            at a given place"
-          - "gldf-flash: bounded task needing some judgment: write or change code in one or two files, explain
-            an error from a short log or traceback, write tests or a script, search or summarise a pasted
-            document, run a known sequence of tool commands"
-          - "combo/glm-grok-failover: hard or open-ended task where a mistake is costly: architecture or
-            migration design, refactoring across several modules, root-cause debugging of intermittent or
-            production failures, reasoning across several long files, or a short follow-up that continues
-            such a task from recent_context"
+        context_reserve_tokens: 32000
+        # ILLUSTRATIVE grid - the final tier table comes from the owner. Least capable first:
+        # grid order is the tier order (fallback max() and context escalation both use it).
+        grid:
+          - id: gemini-3.8-flash          # EXAMPLE id: exact ocx id unconfirmed
+            context: 1000000
+            description: "trivial request answered in one short step with no investigation: greeting or
+              thanks, a one-line factual question, translating a sentence, fixing a named typo or renaming
+              one string at a given place"
+          - id: gldf-flash                # the profile's model.default; window not declared = unknown
+            description: "bounded task needing some judgment: write or change code in one or two files,
+              explain an error from a short log or traceback, write tests or a script, search or summarise
+              a pasted document, run a known sequence of tool commands"
+          - id: gldf-hermes
+            context: 500000               # the smaller member window: the failover may land on grok-4.7
+            description: "hard or open-ended task where a mistake is costly: architecture or migration
+              design, refactoring across several modules, root-cause debugging of intermittent or
+              production failures, reasoning across several long files, or a short follow-up that
+              continues such a task from recent_context"
+        # Used (first that fits) only when neither the chosen model nor a more capable grid entry
+        # fits the prompt.
+        long_context_models:
+          - id: zai/glm-5.3
+            context: 1000000
+            efforts: [low, high, max, ultra]   # medium is rounded up to high
+          - id: gemini-3.1-pro            # EXAMPLE id: exact ocx id unconfirmed
+            context: 1000000
 ```
 
 Notes on this example:
 
-- `combo/glm-grok-failover` **must be created on the ocx hub first**, as a failover combo `xai/glm-5.3`
-  → `xai/grok-4.7`. Until it exists, use `xai/glm-5.3` in its place — both as the grid entry and as
-  `default_model: xai/glm-5.3` (one line each).
-- `combo/fast` is an example id; replace it with a fast id that exists on your hub. A stronger tier
-  (e.g. `xai/grok-4.7` or a `gpt-6-*` id) can be appended *after* the combo entry. All ids are examples.
-- Descriptions are the tier criteria from Jev's own evaluation (`fast` / `general` / `strong`), mapped onto
-  ocx ids; they are not re-measured on this deployment.
+- `gldf-hermes` is an existing ocx combo, being converted to a failover `zai/glm-5.3` → `xai/grok-4.7`.
+  The direct glm id on ocx is `zai/glm-5.3` (note the `zai/` prefix); to route to it without the
+  combo, use `zai/glm-5.3` both as the grid entry and as `default_model`.
+- **The grid is illustrative.** Ids marked EXAMPLE are not confirmed against the ocx catalog; replace them
+  once the owner's tier table arrives. Descriptions are the tier criteria from Jev's own evaluation
+  (`fast` / `general` / `strong`), mapped onto ocx ids, and are not re-measured on this deployment.
 - **Exact id match.** The session's configured model (`model.default`, here `gldf-flash`) must equal a grid
   id exactly, or the turn is left alone. Jev's answer is mapped back to the grid by position, never by name.
+
+Context windows known so far (from the deployment, via Jev), for filling in `context`:
+
+| Model | Window | Id on ocx |
+|---|---|---|
+| gemini-3.8-flash | 1M | example, unconfirmed |
+| zai/glm-5.3 | 1M | exact |
+| glm-5.3-flash | 1M | example, unconfirmed |
+| grok-4.20-reasoning | 1M | example, unconfirmed |
+| gemini-3.1-pro | 1M | example, unconfirmed |
+| xai/grok-4.7 | 500k | exact |
+| gpt-6-* | 272k | family; exact ids unconfirmed |
+
+#### Per-model effort levels (`efforts`)
+
+A grid entry (or `long_context_models` entry) may declare the levels the model accepts:
+`efforts: [low, high, max, ultra]`. The decided level (Jev's, or `default_effort` on a fallback) is then
+**rounded up** onto that list along the canonical ladder
+`none < minimal < low < medium < high < xhigh < max < ultra`; if nothing stronger is declared, the
+strongest declared level is used. `none` is never chosen for an enabled request. The value is written
+verbatim to `reasoning_effort`, so declare only levels your upstream accepts. Without `efforts` the
+earlier rules apply (Ollama family table on Ollama routes, `unknown_effort` elsewhere). Entries accept
+the string form `"id: description"` (no `efforts`/`context`), a map `{id, description, efforts, context}`,
+or a one-key map `{id: description}` / `{id: {description, efforts, context}}`.
+
+#### Context fit (`context`, `context_reserve_tokens`, `long_context_models`)
+
+The prompt is **estimated** as `ceil(chars / 4)` over the JSON of the request's `messages` and `tools`
+(a rule of thumb, not a tokenizer). A model fits when `context > estimate + context_reserve_tokens`
+(default 32000); a model without `context` is treated as fitting. If the chosen model does not fit, the
+next more capable grid entry that fits is used (`fallback_reasons: [..., "context_escalated"]`), then the
+first fitting `long_context_models` entry (`"context_long_model"`); the effort is re-derived for the new
+model. If nothing fits, the request is left untouched and a `skip` record with reason `context_no_fit`
+and the estimate is written. The check runs on every request of a turn (the prompt grows inside a tool
+loop), on the fallback paths, and in shadow mode (the `shadow` record shows the escalated model plus
+`context_from` and `context_estimate`).
 
 How the decision is made off Ollama:
 

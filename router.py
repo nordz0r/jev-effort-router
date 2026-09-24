@@ -11,6 +11,8 @@ The contract is narrow on purpose:
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import logging
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -35,6 +37,8 @@ from .client import (
 from .config import EFFORT_LEVELS, ROUTED_API_MODES, Settings, norm_provider, redact
 from .host import custom_provider_name
 from .memo import Memo, TurnMemo
+from .fit import FIT_NONE, choose as choose_fit, estimate_tokens
+from .effort import effort_for
 from .state import last_user_message
 
 logger = logging.getLogger(__name__)
@@ -172,14 +176,7 @@ class Router:
                 # A decision naming a model the provider does not have is worse than no decision:
                 # asking for it turns a degraded turn into a dead one (HTTP 404, no response).
                 # Leave the request exactly as the operator configured it.
-                if ollama and settings.catalog_check and not self._provider_has(decision.model):
-                    logger.warning(
-                        "jev-effort-router: Jev chose %r, which is not in the provider's catalog; "
-                        "leaving the turn on the configured model",
-                        decision.model,
-                    )
-                    self._record_skip(settings, REASON_SKIPPED_UNKNOWN_MODEL, where,
-                                      extra={"chosen_model": decision.model})
+                if self._missing_from_catalog(settings, ollama, decision.model, where):
                     self._remember_no_decision(settings, turn_id)
                     return None
                 memo = Memo(
@@ -201,14 +198,36 @@ class Router:
                 else:
                     self._memo.put_session(session_id, memo)
 
+            # Context fit runs on every request, replays included: the prompt grows inside a
+            # turn's tool loop, and a model whose window it overflows is a dead turn.
+            estimate = estimate_tokens(request)
+            entry, fit_how = choose_fit(settings, decision.model, estimate)
+            fit_extra: Dict[str, Any] = {}
+            if entry is None:
+                self._record_skip(settings, FIT_NONE, where, extra={
+                    "context_estimate": estimate, "chosen_model": decision.model, "mode": settings.mode})
+                return None
+            if entry.model_id != decision.model:
+                fit_extra = {"context_estimate": estimate, "context_from": decision.model}
+                decision = replace(
+                    decision,
+                    model=entry.model_id,
+                    effort=effort_for(entry, decision.effort_requested, settings.unknown_effort, ollama),
+                    fallback_reasons=tuple(decision.fallback_reasons) + (fit_how,),
+                )
+
+            if fit_extra and self._missing_from_catalog(settings, ollama, decision.model, where):
+                return None
+
             if settings.mode == "shadow":
                 # Decide and record, but send the request exactly as configured.
                 self._record_route(settings, decision, where, api_call_count=api_call_count,
-                                   replayed=replayed, event="shadow")
+                                   replayed=replayed, event="shadow", extra=fit_extra)
                 return None
-            keep_host = not ollama and settings.unknown_effort == "keep"
+            keep_host = not ollama and settings.unknown_effort == "keep" and not entry.efforts
             routed = self._apply(original_request, decision, keep_host)
-            self._record_route(settings, decision, where, api_call_count=api_call_count, replayed=replayed)
+            self._record_route(settings, decision, where, api_call_count=api_call_count, replayed=replayed,
+                               extra=fit_extra)
             return {"request": routed, "source": "jev-effort-router", "reason": decision.model}
         except Exception as exc:  # noqa: BLE001 - a router must never break a turn
             logger.warning(
@@ -235,6 +254,17 @@ class Router:
             logger.debug("jev-effort-router: catalog check failed (%s: %s)", type(exc).__name__, exc)
             return True
         return known is not False
+
+    def _missing_from_catalog(self, settings: Settings, ollama: bool, model_id: str, where: "_Where") -> bool:
+        if not (ollama and settings.catalog_check) or self._provider_has(model_id):
+            return False
+        logger.warning(
+            "jev-effort-router: Jev chose %r, which is not in the provider's catalog; "
+            "leaving the turn on the configured model",
+            model_id,
+        )
+        self._record_skip(settings, REASON_SKIPPED_UNKNOWN_MODEL, where, extra={"chosen_model": model_id})
+        return True
 
     def _remember_no_decision(self, settings: Settings, turn_id: Optional[str]) -> None:
         """Remember, for this turn only, that no decision was reached (never per session: a
@@ -335,6 +365,7 @@ class Router:
         api_call_count: Any = 0,
         replayed: bool = False,
         event: str = "route",
+        extra: Optional[Dict[str, Any]] = None,
     ) -> None:
         record: Dict[str, Any] = {
             "event": event,
@@ -355,6 +386,8 @@ class Router:
             "replayed": bool(replayed),
         }
         record.update(where.fields())
+        if extra:
+            record.update(extra)
         record.update({key: value for key, value in {"api_call_count": api_call_count}.items() if value not in (None, "")})
         self.audit(settings).append(record)
         if decision.degraded:

@@ -138,6 +138,36 @@ def resolve_effort(
     return clamp(effort, family.accepted, family.overrides)
 
 
+def round_up(effort: Optional[str], supported: Sequence[str]) -> Optional[str]:
+    """Land ``effort`` on a model's declared levels, rounding **up** on :data:`LADDER`.
+
+    Verbatim when supported; else the nearest stronger supported level; else (nothing stronger)
+    the strongest supported. ``none`` is never a landing target for an enabled request. ``None``
+    in, ``None`` out: no requested level means the field is not written.
+    """
+    requested = str(effort or "").strip().lower()
+    levels = [level for level in LADDER if level in {str(item).strip().lower() for item in supported}]
+    if not requested or not levels:
+        return None
+    if requested in levels:
+        return requested
+    candidates = [level for level in levels if level != "none"] or levels
+    if requested not in LADDER:
+        return candidates[-1]
+    index = LADDER.index(requested)
+    stronger = [level for level in candidates if LADDER.index(level) > index]
+    return stronger[0] if stronger else candidates[-1]
+
+
+def effort_for(entry: Any, effort: Optional[str], unknown: str = "omit", families: bool = True) -> Optional[str]:
+    """The wire effort for a grid ``entry``: its declared ``efforts`` win (round up); without
+    them the family table / ``unknown_effort`` rules of :func:`resolve_effort` apply."""
+    declared = getattr(entry, "efforts", None)
+    if declared:
+        return round_up(effort, declared)
+    return resolve_effort(getattr(entry, "model_id", entry), effort, unknown, families)
+
+
 def is_omitted(model_id: Optional[str], effort: Optional[str], unknown: str = "omit", families: bool = True) -> bool:
     """True when the router would not write a reasoning-effort field."""
     return resolve_effort(model_id, effort, unknown, families) is None
