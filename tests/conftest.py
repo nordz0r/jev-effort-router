@@ -61,8 +61,10 @@ _install_package()
 def _router_api_key(monkeypatch):
     """Every test runs as an operator with a configured key.
 
-    The client short-circuits before the request when ``OPENROUTER_API_KEY`` is absent, so without
+    The client short-circuits before the request when the backend's key (``TYPESAFE_API_KEY`` by
+    default, ``OPENROUTER_API_KEY`` for the OpenRouter backend) is absent, so without
     this every routing test would take the "no key" path and silently pass for the wrong reason.
     Tests that assert the unconfigured behaviour delete it explicitly.
     """
     monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test")
+    monkeypatch.setenv("TYPESAFE_API_KEY", "ts-test")

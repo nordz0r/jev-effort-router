@@ -4,6 +4,56 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0+ocx] - 2026-09-25
+
+### Added
+
+- Routing on any configured provider, e.g. an OpenCodex (ocx) `custom_providers` entry:
+  `routed_providers` (the `custom:` prefix is ignored; unset = `ollama-cloud`, `[]` = none) and
+  `routed_base_urls` (boundary match). A bare `custom` provider is resolved to its entry name by
+  `base_url`, so `custom:ocx` is routed and `custom:zai` is not. An empty provider name is never routed.
+- `mode: shadow | route`. Shadow asks Jev and audits the decision (`event: "shadow"`) without changing
+  the request; it honours every gate and the per-turn cache.
+- `backend: typesafe` (default, `https://api.typesafe.ai/v1/systemone`, `jev-1.13.0`,
+  `TYPESAFE_API_KEY`) and `backend: openrouter`; `endpoint`, `jev_model` and `api_key_env` overridable.
+  One retry on HTTP 429/529 inside `timeout_s`.
+- The API key is read through Hermes' `get_secret` (per-profile secret scope under multiplexing).
+- Grid ids may be `provider/model` or `combo/<id>`; entries split on `": "` (ids with a colon survive)
+  and may be one-key YAML maps; ids with an empty segment are rejected.
+- `unknown_effort` (`omit` default / `keep` / `pass`) for non-Ollama routes.
+- `catalog_check`; the Ollama cache and effort families apply only to Ollama providers.
+
+- Per-model effort levels from config: grid entries may be maps `{id, description, efforts, context}`
+  (string form unchanged). With `efforts`, the decided level is rounded up on
+  `none < minimal < low < medium < high < xhigh < max < ultra` (strongest declared if nothing higher).
+- Context fit: prompt estimated as `ceil(chars/4)` over messages + tools; a model fits when
+  `context > estimate + context_reserve_tokens` (default 32000). Escalates up the grid, then to
+  `long_context_models`, else leaves the request untouched (`context_no_fit`). Runs on every request,
+  on fallbacks and in shadow.
+- README nord example: `default_model: gldf-hermes`, illustrative grid with context windows,
+  `zai/glm-5.3` as the direct glm id.
+
+- `status` reports `backend`, `mode`, `api_key_env`, and checks the key the router would use;
+  key hints and the registration warning name the configured variable and backend.
+
+### Fixed
+
+- `route_per_turn: false`: a failed turn (and an outage fallback) is memoized for that turn only, so
+  its tool loop does not call Jev again and the session is not pinned to the fallback.
+- Effort Score rounding is explicit half-up (`floor(x + 0.5)`), not banker's `round()`.
+
+### Changed
+
+- Model question: "least capable tier that still completes the task", description-only options plus
+  `unclear` (→ `default_model`). State is `user_message`, `user_message_chars`, `recent_context`
+  (surface and provider removed). Effort is a Score (low/medium/high), rounded.
+- Below threshold the more capable of (choice, `default_model`) by grid order is used; list the grid
+  least capable first. With no `default_model` the request is untouched.
+- Jev unavailable (timeout / HTTP error / malformed) falls back to `default_model` when it is on the grid.
+- `default_model` defaults to `""`.
+- A turn that could not be decided is remembered for that turn only, so its tool loop does not repeat
+  the failed Jev call.
+
 ## [0.2.0] - 2026-09-23
 
 ### Changed

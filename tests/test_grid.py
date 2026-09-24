@@ -19,15 +19,15 @@ def test_default_grid_is_the_six_benchmarked_models():
     ]
 
 
-def test_criteria_are_keyed_by_position_with_a_readable_profile():
+def test_criteria_are_keyed_by_position_with_the_task_description_only():
     mapping = criteria(DEFAULT_GRID)
     assert set(mapping) == {"1", "2", "3", "4", "5", "6"}
-    assert mapping["1"].startswith("deepseek-v4.1-flash: ")
+    # 0.3: the model id is not sent to Jev; code maps the positional key back to it.
     assert mapping["1"] == (
-        "deepseek-v4.1-flash: the usual choice for general work: everyday writing, "
+        "the usual choice for general work: everyday writing, "
         "explanation, summarising, ordinary coding and tool use; 1M context; cheap for its size"
     )
-    assert mapping["2"].startswith("kimi-k3: ")
+    assert all(entry.model_id not in mapping[str(i)] for i, entry in enumerate(DEFAULT_GRID, start=1))
 
 
 def test_no_profile_is_a_task_free_superlative():

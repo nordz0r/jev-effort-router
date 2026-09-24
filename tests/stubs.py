@@ -79,7 +79,7 @@ def decision_payload(
     effort_probabilities: Optional[Dict[str, float]] = None,
     include_effort: bool = True,
     model_type: str = "choice",
-    effort_type: str = "choice",
+    effort_type: str = "score",
     grid_size: int = 6,
 ) -> Dict[str, Any]:
     """A well-formed Decisions API body, as documented in ``docs/jev-decisions-api.md``.
@@ -98,10 +98,15 @@ def decision_payload(
         }
     }
     if include_effort:
+        # The effort question is a Score over low/medium/high: the answer carries the
+        # probability-weighted level index, rounded by the client.
+        levels = ["low", "medium", "high"]
+        score = levels.index(effort_choice) if effort_choice in levels else effort_choice
         answers["reasoning_effort"] = {
             "type": effort_type,
-            "choice": effort_choice,
-            "probabilities": effort_probabilities or {effort_choice: effort_confidence},
+            "score": score,
+            "legend": {str(index): level for index, level in enumerate(levels)},
+            "probabilities": effort_probabilities or {str(score): effort_confidence},
             "confidence": effort_confidence,
         }
     return {"answers": answers}

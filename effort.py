@@ -52,14 +52,20 @@ FAMILIES: Tuple[Family, ...] = (
 )
 
 
-def family_for(model_id: Optional[str]) -> Family:
-    """Pick the family contract for a model id.
+def family_for(model_id: Optional[str]) -> Optional[Family]:
+    """Pick the family contract for a model id, or ``None`` when there is none to apply.
 
     Matching is a substring test on the bare slug, so ``kimi-k3``, ``kimi-k3-256k`` and a
-    ``vendor/kimi-k3`` prefix all land on the same row. Unknown models get the
-    Ollama:cloud vocabulary, which is the widest set this router's provider accepts.
+    ``vendor/kimi-k3`` prefix all land on the same row. An unknown bare id is an Ollama:cloud
+    model and gets that vocabulary, the widest set that provider accepts. An unknown
+    ``provider/model`` id and any ``combo/<id>`` (a combo can be any model) have no known
+    contract: ``None``, and the caller decides via ``unknown_effort``. Only consulted for
+    Ollama:cloud routes (see :func:`resolve_effort`).
     """
-    slug = (model_id or "").strip().lower().rsplit("/", 1)[-1]
+    raw = (model_id or "").strip().lower()
+    if raw.startswith("combo/"):
+        return None
+    slug = raw.rsplit("/", 1)[-1]
     if not slug:
         return OLLAMA_CLOUD
     if "kimi" in slug and _token(slug, "k3"):
@@ -72,7 +78,7 @@ def family_for(model_id: Optional[str]) -> Family:
         return FAMILIES[4]
     if "nemotron" in slug:
         return FAMILIES[5]
-    return OLLAMA_CLOUD
+    return None if "/" in raw else OLLAMA_CLOUD
 
 
 def _token(slug: str, needle: str) -> bool:
@@ -116,13 +122,52 @@ def clamp(
     return min(candidates, key=LADDER.index)
 
 
-def resolve_effort(model_id: Optional[str], effort: Optional[str]) -> Optional[str]:
-    """The exact value to put on the wire for ``model_id``, or ``None`` to omit the field."""
-    family = family_for(model_id)
-    clamped = clamp(effort, family.accepted, family.overrides)
-    return clamped
+def resolve_effort(
+    model_id: Optional[str], effort: Optional[str], unknown: str = "omit", families: bool = True
+) -> Optional[str]:
+    """The exact value to put on the wire for ``model_id``, or ``None`` to not write the field.
+
+    ``families=False`` (every non-Ollama route) skips the table above: its vocabularies were
+    taken from Ollama:cloud's wire and say nothing about another upstream. With no family,
+    only ``unknown="pass"`` writes a value (the requested level, verbatim); ``omit``/``keep``
+    return ``None`` and the router applies the choice to the host's value.
+    """
+    family = family_for(model_id) if families else None
+    if family is None:
+        return (str(effort or "").strip().lower() or None) if unknown == "pass" else None
+    return clamp(effort, family.accepted, family.overrides)
 
 
-def is_omitted(model_id: Optional[str], effort: Optional[str]) -> bool:
-    """True when the request would go out without a reasoning-effort field."""
-    return resolve_effort(model_id, effort) is None
+def round_up(effort: Optional[str], supported: Sequence[str]) -> Optional[str]:
+    """Land ``effort`` on a model's declared levels, rounding **up** on :data:`LADDER`.
+
+    Verbatim when supported; else the nearest stronger supported level; else (nothing stronger)
+    the strongest supported. ``none`` is never a landing target for an enabled request. ``None``
+    in, ``None`` out: no requested level means the field is not written.
+    """
+    requested = str(effort or "").strip().lower()
+    levels = [level for level in LADDER if level in {str(item).strip().lower() for item in supported}]
+    if not requested or not levels:
+        return None
+    if requested in levels:
+        return requested
+    candidates = [level for level in levels if level != "none"] or levels
+    if requested not in LADDER:
+        return candidates[-1]
+    index = LADDER.index(requested)
+    stronger = [level for level in candidates if LADDER.index(level) > index]
+    return stronger[0] if stronger else candidates[-1]
+
+
+def effort_for(entry: Any, effort: Optional[str], unknown: str = "omit", families: bool = True) -> Optional[str]:
+    """The wire effort for a grid ``entry``: its declared ``efforts`` win (round up); without
+    them the family table / ``unknown_effort`` rules of :func:`resolve_effort` apply."""
+    declared = getattr(entry, "efforts", None)
+    if declared:
+        return round_up(effort, declared)
+    return resolve_effort(getattr(entry, "model_id", entry), effort, unknown, families)
+
+
+def is_omitted(model_id: Optional[str], effort: Optional[str], unknown: str = "omit", families: bool = True) -> bool:
+    """True when the router would not write a reasoning-effort field."""
+    return resolve_effort(model_id, effort, unknown, families) is None

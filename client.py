@@ -13,16 +13,21 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from .config import Settings, api_key, redact
-from .effort import resolve_effort
+from .effort import effort_for
 from .grid import Entry, resolve
 from .state import (
     EFFORT_QUESTION_ID,
     MODEL_QUESTION_ID,
+    UNCLEAR_KEY,
     build_payload,
     normalise_effort_choice,
 )
 
 logger = logging.getLogger(__name__)
+
+#: TypeSafe documents 429 (rate limit) and 529 (overloaded) as retry-after-backoff statuses.
+RETRY_STATUSES = (429, 529)
+RETRY_BACKOFF_S = 0.2
 
 #: Reasons a turn was left unrouted. Stable strings — they are what the audit file records.
 REASON_DISABLED = "disabled"
@@ -38,6 +43,7 @@ REASON_TIMEOUT = "timeout"
 REASON_MALFORMED = "malformed_answer"
 REASON_LOW_CONFIDENCE = "low_confidence"
 REASON_UNKNOWN_CHOICE = "unknown_choice"
+REASON_UNCLEAR = "unclear"
 REASON_USER_DATA = "user_data"
 REASON_EXCEPTION = "exception"
 
@@ -123,34 +129,19 @@ class JevClient:
 
     # -- transport ---------------------------------------------------------------
 
-    def _post(self, payload: Dict[str, Any]) -> Tuple[Optional[Any], Optional[str]]:
-        headers = {
-            "Authorization": f"Bearer {api_key()}",
-            "Content-Type": "application/json",
-            # Ranking headers are optional; they make the traffic identifiable on OpenRouter.
-            "X-Title": "hermes-jev-effort-router",
-        }
+    def _post(self, payload: Dict[str, Any], key: str, timeout: float) -> Tuple[Optional[Any], Optional[str]]:
+        headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
+        if self._settings.backend == "openrouter":
+            # Ranking header; optional, it makes the traffic identifiable on OpenRouter.
+            headers["X-Title"] = "hermes-jev-effort-router"
         if self._transport is not None:
-            response = self._transport.post(
-                self._settings.endpoint,
-                json=payload,
-                headers=headers,
-                timeout=self._settings.timeout_s,
-            )
+            response = self._transport.post(self._settings.endpoint, json=payload, headers=headers, timeout=timeout)
             return response, None
 
         import httpx  # lazy: no socket machinery while the plugin registers
 
-        with httpx.Client(timeout=self._settings.timeout_s) as client:
-            return (
-                client.post(
-                    self._settings.endpoint,
-                    json=payload,
-                    headers=headers,
-                    timeout=self._settings.timeout_s,
-                ),
-                None,
-            )
+        with httpx.Client(timeout=timeout) as client:
+            return client.post(self._settings.endpoint, json=payload, headers=headers, timeout=timeout), None
 
     # -- routing -----------------------------------------------------------------
 
@@ -161,6 +152,7 @@ class JevClient:
         *,
         platform: str = "",
         provider: str = "",
+        effort_families: bool = True,
     ) -> Tuple[Optional[Decision], Optional[str]]:
         """Ask Jev for a model and an effort level.
 
@@ -175,7 +167,8 @@ class JevClient:
         Telling Jev what is configured defeats the purpose of asking it.
         """
         settings = self._settings
-        if not api_key():
+        key = api_key(settings)
+        if not key:
             return None, REASON_NO_API_KEY
 
         payload = build_payload(
@@ -183,40 +176,67 @@ class JevClient:
             grid,
             jev_model=settings.jev_model,
             context_turns=settings.context_turns,
-            platform=platform,
-            provider=provider,
         )
 
         started = time.monotonic()
-        try:
-            response, _ = self._post(payload)
-        except Exception as exc:  # noqa: BLE001 - a router must never break a turn
-            latency_ms = int((time.monotonic() - started) * 1000)
-            name = type(exc).__name__
-            timeout_types = ("Timeout", "ReadTimeout", "ConnectTimeout", "PoolTimeout", "TimeoutException")
-            if any(token in name for token in timeout_types):
-                logger.warning("jev-effort-router: Jev timed out after %d ms (%s)", latency_ms, name)
-                return None, REASON_TIMEOUT
-            logger.warning("jev-effort-router: Jev call failed: %s: %s", name, redact(exc, 300))
-            return None, REASON_UPSTREAM_ERROR
+        response = None
+        for attempt in (0, 1):
+            remaining = settings.timeout_s - (time.monotonic() - started)
+            try:
+                response, _ = self._post(payload, key, max(remaining, 0.05))
+            except Exception as exc:  # noqa: BLE001 - a router must never break a turn
+                latency_ms = int((time.monotonic() - started) * 1000)
+                name = type(exc).__name__
+                timeout_types = ("Timeout", "ReadTimeout", "ConnectTimeout", "PoolTimeout", "TimeoutException")
+                if any(token in name for token in timeout_types):
+                    logger.warning("jev-effort-router: Jev timed out after %d ms (%s)", latency_ms, name)
+                    return None, REASON_TIMEOUT
+                logger.warning("jev-effort-router: Jev call failed: %s: %s", name, redact(exc, 300, settings))
+                return None, REASON_UPSTREAM_ERROR
+            # 429 rate limit / 529 overloaded: one short back-off retry, only inside the budget.
+            remaining = settings.timeout_s - (time.monotonic() - started)
+            if attempt == 0 and getattr(response, "status_code", None) in RETRY_STATUSES and remaining > 2 * RETRY_BACKOFF_S:
+                time.sleep(RETRY_BACKOFF_S)
+                continue
+            break
         latency_ms = int((time.monotonic() - started) * 1000)
 
         status = getattr(response, "status_code", None)
         if status is None or not (200 <= int(status) < 300):
-            body = redact(getattr(response, "text", ""), 300)
+            body = redact(getattr(response, "text", ""), 300, settings)
             logger.warning("jev-effort-router: Jev returned HTTP %s: %s", status, body)
             return None, REASON_UPSTREAM_ERROR
 
         try:
             data = response.json()
         except Exception:  # noqa: BLE001 - a non-JSON body is just another failure
-            logger.warning("jev-effort-router: Jev returned a non-JSON body: %s", redact(getattr(response, "text", ""), 300))
+            logger.warning("jev-effort-router: Jev returned a non-JSON body: %s",
+                           redact(getattr(response, "text", ""), 300, settings))
             return None, REASON_MALFORMED
 
-        return self._interpret(data, grid, latency_ms=latency_ms)
+        return self._interpret(data, grid, latency_ms=latency_ms, effort_families=effort_families)
+
+    def fallback(self, reason: str, *, effort_families: bool = True) -> Optional[Decision]:
+        """The decision when Jev is unavailable (timeout, HTTP error, malformed body): the
+        configured ``default_model`` at ``default_effort``, or ``None`` (request untouched)
+        when no fallback is on the grid."""
+        settings = self._settings
+        chosen = settings.entry_for(settings.default_model)
+        if chosen is None:
+            return None
+        return Decision(
+            model=chosen.model_id,
+            effort=effort_for(chosen, settings.default_effort, settings.unknown_effort, effort_families),
+            effort_requested=settings.default_effort,
+            model_confidence=0.0,
+            effort_confidence=0.0,
+            model_choice="",
+            effort_choice="",
+            fallback_reasons=(reason,),
+        )
 
     def _interpret(
-        self, data: Any, grid: Sequence[Entry], *, latency_ms: int
+        self, data: Any, grid: Sequence[Entry], *, latency_ms: int, effort_families: bool = True
     ) -> Tuple[Optional[Decision], Optional[str]]:
         settings = self._settings
         if not isinstance(data, dict):
@@ -240,18 +260,26 @@ class JevClient:
             model_choice_text = _choice_text(model_answer)
             model_confidence = _as_float(model_answer.get("confidence"))
             model_probabilities = _as_probabilities(model_answer.get("probabilities"))
-            chosen = resolve(_criteria_map(model_answer), model_choice_text, grid)
-            if chosen is None:
-                reasons.append(REASON_UNKNOWN_CHOICE)
-            elif model_confidence < settings.confidence_threshold:
-                reasons.append(REASON_LOW_CONFIDENCE)
-                chosen = None
+            if model_choice_text.strip().lower() == UNCLEAR_KEY:
+                reasons.append(REASON_UNCLEAR)
+            else:
+                chosen = resolve(_criteria_map(model_answer), model_choice_text, grid)
+                if chosen is None:
+                    reasons.append(REASON_UNKNOWN_CHOICE)
+                elif model_confidence < settings.confidence_threshold:
+                    # Below threshold: never downgrade. Take the more capable of the choice and
+                    # the fallback, by grid position (grids are listed least capable first).
+                    reasons.append(REASON_LOW_CONFIDENCE)
+                    fallback = settings.entry_for(settings.default_model)
+                    chosen = _more_capable(grid, chosen, fallback) if fallback else None
 
         if chosen is None:
-            chosen = self._settings.entry_for(settings.default_model)
-            model = chosen.model_id if chosen else settings.default_model
-        else:
-            model = chosen.model_id
+            chosen = settings.entry_for(settings.default_model)
+            if chosen is None:
+                # No usable model answer and no fallback on the grid (the default): keep the
+                # configured model — a distrusted decision must never silently downgrade it.
+                return None, reasons[0] if reasons else REASON_LOW_CONFIDENCE
+        model = chosen.model_id
 
         # -- effort ----------------------------------------------------------------
         # A usable-but-distrusted effort answer (low confidence, off-vocabulary choice)
@@ -266,14 +294,15 @@ class JevClient:
         answered = False
         if effort_answer is None:
             reasons.append(REASON_MALFORMED)
-        elif answer_type(effort_answer) != "choice":
+        elif answer_type(effort_answer) != "score":
             reasons.append(REASON_MALFORMED)
         else:
             answered = True
-            effort_choice_text = _choice_text(effort_answer)
+            score = effort_answer.get("score")
+            effort_choice_text = str(score)
             effort_confidence = _as_float(effort_answer.get("confidence"))
             effort_probabilities = _as_probabilities(effort_answer.get("probabilities"))
-            candidate = normalise_effort_choice(effort_choice_text)
+            candidate = normalise_effort_choice(score if isinstance(score, (int, float)) else None)
             if candidate is None:
                 reasons.append(REASON_UNKNOWN_CHOICE)
             elif effort_confidence < settings.confidence_threshold:
@@ -284,7 +313,7 @@ class JevClient:
         if requested is None and answered:
             requested = settings.default_effort
 
-        effort = resolve_effort(model, requested)
+        effort = effort_for(chosen, requested, settings.unknown_effort, effort_families)
 
         alternatives = tuple(
             entry.model_id for entry in grid if entry.model_id != model
@@ -308,6 +337,12 @@ class JevClient:
             ),
             None,
         )
+
+
+def _more_capable(grid: Sequence[Entry], first: Entry, second: Entry) -> Entry:
+    """The later of two entries in grid order (the grid lists tiers least capable first)."""
+    order = {entry.model_id: index for index, entry in enumerate(grid)}
+    return max((first, second), key=lambda entry: order.get(entry.model_id, -1))
 
 
 def _criteria_map(model_answer: Dict[str, Any]) -> Dict[str, str]:

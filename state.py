@@ -8,6 +8,8 @@ conditioned on the other at the wire level; any coupling is the router's job in 
 
 from __future__ import annotations
 
+import math
+
 import re
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Sequence, Tuple
@@ -18,14 +20,27 @@ from .grid import Entry, criteria
 MODEL_QUESTION_ID = "model_route"
 EFFORT_QUESTION_ID = "reasoning_effort"
 
+#: A minimum-sufficient-tier question, measured on TypeSafe's API (jev-1.13.0) to route better
+#: than a "best fit, weighing cost and speed" question. The options are task descriptions only.
 MODEL_INSTRUCTIONS = (
-    "Which model is best suited to handle the user's request in `user_message`, given "
-    "`recent_context`? Compare every option on the same axes — what the task actually needs, "
-    "how much it costs, and how fast it is — and pick the single best fit."
+    "What is the least capable tier that will still complete the request in `user_message` "
+    "correctly on the first attempt? When `user_message` is a short follow-up (e.g. 'ok, go "
+    "ahead'), judge the task it continues in `recent_context`. Judge only what the task needs, "
+    "not cost or speed."
 )
+
+#: Extra option on the model question; answering it resolves to the configured fallback.
+UNCLEAR_KEY = "unclear"
+UNCLEAR_CRITERION = (
+    "The task cannot be determined from `user_message` and `recent_context`: empty, "
+    "meaningless, or referring to something not visible."
+)
+
+#: Effort is a Score over three ordered levels, rounded to the nearest level — measured more
+#: accurate than a Choice over the same levels (81% vs 65%).
 EFFORT_INSTRUCTIONS = (
-    "Which level of reasoning effort does the request in `user_message` require? A high effort "
-    "is slower and more expensive: pick it only when the request genuinely needs deep analysis."
+    "How much reasoning effort does the request in `user_message` require? When it is a short "
+    "follow-up, judge the task it continues in `recent_context`."
 )
 
 EFFORT_CRITERIA: Dict[str, str] = {
@@ -122,8 +137,6 @@ def build_state(
     messages: Sequence[Dict[str, Any]],
     *,
     context_turns: int,
-    platform: str = "",
-    provider: str = "",
 ) -> Dict[str, Any]:
     """The ``state`` object: only the context the two questions need.
 
@@ -131,31 +144,31 @@ def build_state(
     decision on that model — measured against the live endpoint, ``current_model`` flipped a
     code-debugging task from ``kimi-k3`` (option 2, 4/4 calls) to the configured
     ``deepseek-v4.1-flash`` (option 1, 4/4 calls). Jev is told what the task is, not what the
-    operator happens to have set; that is the whole point of asking it.
+    operator happens to have set; that is the whole point of asking it. Surface and provider
+    names are not sent either: they carry nothing about the task.
+
+    ``user_message_chars`` is the untruncated length, which truncation would otherwise hide.
     """
-    state: Dict[str, Any] = {
-        "user_message": _clean(last_user_message(messages), MESSAGE_CHAR_LIMIT),
+    message = last_user_message(messages)
+    return {
+        "user_message": _clean(message, MESSAGE_CHAR_LIMIT),
+        "user_message_chars": len(message),
         "recent_context": recent_context(messages, context_turns),
     }
-    if platform:
-        state["surface"] = platform
-    if provider:
-        state["provider"] = provider
-    return state
 
 
 def build_questions(grid: Sequence[Entry]) -> Dict[str, Any]:
-    """The two Choice questions, as the endpoint expects them."""
+    """The model Choice (grid positions plus ``unclear``) and the effort Score."""
     return {
         MODEL_QUESTION_ID: {
             "type": "choice",
             "instructions": MODEL_INSTRUCTIONS,
-            "criteria": criteria(grid),
+            "criteria": {**criteria(grid), UNCLEAR_KEY: UNCLEAR_CRITERION},
         },
         EFFORT_QUESTION_ID: {
-            "type": "choice",
+            "type": "score",
             "instructions": EFFORT_INSTRUCTIONS,
-            "criteria": dict(EFFORT_CRITERIA),
+            "criteria": [EFFORT_CRITERIA[level] for level in EFFORT_LEVELS],
         },
     }
 
@@ -166,23 +179,23 @@ def build_payload(
     *,
     jev_model: str,
     context_turns: int,
-    platform: str = "",
-    provider: str = "",
 ) -> Dict[str, Any]:
-    """The complete Decisions API request body."""
+    """The complete request body (identical for TypeSafe's System One API and OpenRouter)."""
     return {
         "model": jev_model,
-        "state": build_state(
-            messages,
-            context_turns=context_turns,
-            platform=platform,
-            provider=provider,
-        ),
+        "state": build_state(messages, context_turns=context_turns),
         "questions": build_questions(grid),
     }
 
 
 def normalise_effort_choice(raw: Any) -> Optional[str]:
-    """Coerce Jev's effort answer onto ``low``/``medium``/``high``."""
+    """Coerce Jev's effort answer onto ``low``/``medium``/``high``: a Score value rounded to the
+    nearest level index (0..2), or a level name; anything else is ``None``."""
+    if isinstance(raw, (int, float)) and not isinstance(raw, bool):
+        # Explicit half-up (floor(x + 0.5)): Python's round() is banker's rounding, which
+        # would send 0.5 to low and 1.5 to high.
+        index = math.floor(raw + 0.5)
+        return EFFORT_LEVELS[index] if 0 <= index < len(EFFORT_LEVELS) else None
     text = str(raw or "").strip().lower()
     return text if text in EFFORT_LEVELS else None
+

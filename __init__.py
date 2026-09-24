@@ -1,9 +1,10 @@
 """jev-effort-router — route each Hermes turn through TypeSafe Jev's decision endpoint.
 
-What it does: on the first provider request of every user turn, ask Jev (`typesafe/jev-1.13`
-over OpenRouter's Decisions API) which Ollama:cloud model and which reasoning-effort level fit
-the task, then rewrite the outgoing request accordingly. Jev generates nothing; the selected
-model still does all the reasoning and all the writing.
+What it does: on the first provider request of every user turn, ask Jev (TypeSafe's System One
+API by default, ``jev-1.13.0``; or OpenRouter's Decisions API, ``typesafe/jev-1.13``) which grid model (Ollama:cloud, or ocx ``provider/model`` /
+``combo/<id>``) and which reasoning-effort level fit the task, then rewrite the outgoing
+request accordingly. Jev generates nothing; the selected model still does all the reasoning
+and all the writing.
 
 Where it plugs in: the ``llm_request`` middleware kind
 (``hermes_cli/middleware.py``, invoked from ``agent/turn_api_request.py::build_api_request``),
@@ -26,7 +27,7 @@ import os
 from typing import Any, Optional
 
 from .commands import register_commands
-from .config import api_key, load_settings
+from .config import api_key, key_hint, load_settings
 from .router import Router
 from .tools import build_tool_registrations
 
@@ -37,14 +38,24 @@ logger = logging.getLogger(__name__)
 PLUGIN_ID = "jev-effort-router"
 
 
-def _warn_missing_key_once() -> None:
-    """Say it once at registration, then stay quiet: the per-turn path must not spam."""
-    if api_key():
-        return
-    logger.info(
-        "jev-effort-router: OPENROUTER_API_KEY is not set — the router is inert until a key is "
-        "available (Jev is reached through OpenRouter)."
-    )
+def _warn_missing_key_once(settings: Any = None) -> None:
+    """Say it once at registration, then stay quiet: the per-turn path must not spam.
+
+    Resolved exactly as the router resolves it (``api_key_env`` through the profile secret
+    scope). Under gateway multiplexing no profile scope exists at registration, so the key can
+    look absent here and still be present per request."""
+    try:
+        if api_key(settings):
+            return
+        logger.info(
+            "jev-effort-router: %s is not visible here — the router is inert until a key is "
+            "available (backend %s). %s",
+            getattr(settings, "api_key_env", "the API key"),
+            getattr(settings, "backend", "?"),
+            key_hint(settings),
+        )
+    except Exception:  # noqa: BLE001 - a log line never breaks registration
+        logger.debug("jev-effort-router: key check at registration failed", exc_info=True)
 
 
 def register(ctx: Any) -> None:
@@ -81,7 +92,7 @@ def register(ctx: Any) -> None:
 
     register_commands(ctx, router, get_settings)
 
-    _warn_missing_key_once()
+    _warn_missing_key_once(get_settings())
     logger.debug("jev-effort-router: registered llm_request middleware, tools, hooks and commands")
 
 

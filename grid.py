@@ -18,8 +18,11 @@ now cross-checks the grid against the provider's own model list before a decisio
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import Any, Iterable, List, Optional, Sequence, Tuple
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -30,11 +33,17 @@ class Entry:
     model_id: str
     #: Human-readable profile line, sent to Jev as the criterion description.
     description: str
+    #: Reasoning-effort levels this model accepts (config-driven, canonical ladder names).
+    #: ``None``: not declared — the family table / ``unknown_effort`` rules apply.
+    efforts: Optional[Tuple[str, ...]] = None
+    #: Context window in tokens. ``None``: unknown, treated as fitting any prompt.
+    context: Optional[int] = None
 
     @property
     def criterion(self) -> str:
-        """The exact string Jev sees for this option."""
-        return f"{self.model_id}: {self.description}" if self.description else self.model_id
+        """The exact string Jev sees for this option: the task description only. The model id
+        is not sent — Jev judges the task, and code maps the chosen option back to the id."""
+        return self.description or self.model_id
 
 
 #: The six benchmarked Ollama:cloud models, in the order they are offered to Jev.
@@ -79,20 +88,73 @@ DEFAULT_GRID: Tuple[Entry, ...] = (
 )
 
 
+def valid_model_id(model_id: str) -> bool:
+    """No empty path segment: ``combo/``, ``moonshot/``, ``/x`` and ``a//b`` are not ids."""
+    return bool(model_id) and all(segment.strip() for segment in model_id.split("/"))
+
+
+#: Canonical reasoning-effort ladder, weakest first (mirrors ``effort.LADDER``).
+_LADDER = ("none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra")
+
+
+def _efforts(raw: Any) -> Optional[Tuple[str, ...]]:
+    """Declared effort levels, lower-cased, ladder names only, in ladder order; ``None`` when
+    absent or when nothing usable is declared."""
+    if isinstance(raw, str):
+        raw = [item for item in raw.replace(",", " ").split()]
+    if not isinstance(raw, (list, tuple)):
+        return None
+    levels = {str(item).strip().lower() for item in raw}
+    ordered = tuple(level for level in _LADDER if level in levels)
+    return ordered or None
+
+
+def _context(raw: Any) -> Optional[int]:
+    try:
+        value = int(float(raw))
+    except (TypeError, ValueError):
+        return None
+    return value if value > 0 else None
+
+
 def parse_entry(raw: Any) -> Optional[Entry]:
-    """Parse ``"model-id: description"`` (or a ``{model_id, description}`` mapping)."""
+    """Parse ``"model-id: description"``, a ``{id, description, efforts, context}`` mapping, or
+    a one-key ``{model-id: description}`` mapping (what unquoted YAML ``- combo/fast: trivial``
+    yields) whose value may itself be a ``{description, efforts, context}`` mapping.
+
+    A string splits on ``": "``; failing that, on the first ``":"`` only when the rest reads
+    like a description (has a space), so ``openrouter/qwen/qwen3-coder:free`` stays one id.
+    """
     if isinstance(raw, dict):
-        model_id = str(raw.get("model_id") or raw.get("model") or raw.get("id") or "").strip()
-        description = str(raw.get("description") or raw.get("profile") or "").strip()
-        return Entry(model_id, description) if model_id else None
+        if any(key in raw for key in ("model_id", "model", "id")):
+            model_id = str(raw.get("model_id") or raw.get("model") or raw.get("id") or "").strip()
+            fields = raw
+        elif len(raw) == 1:
+            key, value = next(iter(raw.items()))
+            model_id = str(key or "").strip()
+            fields = value if isinstance(value, dict) else {"description": value}
+        else:
+            return None
+        if not valid_model_id(model_id):
+            return None
+        description = str(fields.get("description") or fields.get("profile") or "").strip()
+        return Entry(model_id, description, _efforts(fields.get("efforts")), _context(fields.get("context")))
     text = str(raw or "").strip()
     if not text:
         return None
-    model_id, separator, description = text.partition(":")
+    if ": " in text:
+        model_id, _, description = text.partition(": ")
+    else:
+        head, _, tail = text.partition(":")
+        model_id, description = (head, tail) if " " in tail.strip() else (text, "")
+        if not description and tail and any(ch.isalpha() for ch in tail):
+            # "id:desc" with no space is read as ONE id (so "qwen3-coder:free" survives).
+            logger.debug("jev-effort-router: grid entry %r has no ': ' separator; read as the bare "
+                         "id %r (write 'id: description' to add a description)", text, text)
     model_id = model_id.strip()
-    if not model_id:
+    if not valid_model_id(model_id):
         return None
-    return Entry(model_id, description.strip() if separator else "")
+    return Entry(model_id, description.strip())
 
 
 def parse_grid(raw: Any) -> Tuple[Entry, ...]:
