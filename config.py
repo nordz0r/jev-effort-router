@@ -278,6 +278,14 @@ def api_key(settings: Optional["Settings"] = None) -> str:
     return secret(name)
 
 
+def key_hint(settings: Optional["Settings"] = None) -> str:
+    """Where the key is expected, for the configured backend (names only, never values)."""
+    name = settings.api_key_env if settings is not None else BACKENDS[DEFAULT_BACKEND]["api_key_env"]
+    backend = settings.backend if settings is not None else DEFAULT_BACKEND
+    return (f"Set {name} in the Hermes .env file (the profile's .env under multiplexing) for the "
+            f"{backend} backend, then restart the session.")
+
+
 def redact(value: Any, limit: int = 200, settings: Optional["Settings"] = None) -> str:
     """Render a value for a log line with any credential-looking substring removed."""
     text = str(value)

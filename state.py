@@ -8,6 +8,8 @@ conditioned on the other at the wire level; any coupling is the router's job in 
 
 from __future__ import annotations
 
+import math
+
 import re
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Sequence, Tuple
@@ -190,7 +192,9 @@ def normalise_effort_choice(raw: Any) -> Optional[str]:
     """Coerce Jev's effort answer onto ``low``/``medium``/``high``: a Score value rounded to the
     nearest level index (0..2), or a level name; anything else is ``None``."""
     if isinstance(raw, (int, float)) and not isinstance(raw, bool):
-        index = round(raw)
+        # Explicit half-up (floor(x + 0.5)): Python's round() is banker's rounding, which
+        # would send 0.5 to low and 1.5 to high.
+        index = math.floor(raw + 0.5)
         return EFFORT_LEVELS[index] if 0 <= index < len(EFFORT_LEVELS) else None
     text = str(raw or "").strip().lower()
     return text if text in EFFORT_LEVELS else None

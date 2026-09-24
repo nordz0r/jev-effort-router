@@ -193,7 +193,10 @@ class Router:
                 # store off that value silently never stored anything, and every call inside a
                 # turn's tool loop re-decided. Absence of a memo is the reliable "first call of
                 # this turn" signal.
-                if settings.route_per_turn:
+                # A fallback taken because Jev was unavailable is kept for this turn only, in
+                # either mode: an outage must not pin the whole session to the fallback.
+                unavailable = any(reason in JEV_UNAVAILABLE for reason in decision.fallback_reasons)
+                if settings.route_per_turn or unavailable:
                     self._memo.put_turn(turn_id, memo)
                 else:
                     self._memo.put_session(session_id, memo)
@@ -267,9 +270,10 @@ class Router:
         return True
 
     def _remember_no_decision(self, settings: Settings, turn_id: Optional[str]) -> None:
-        """Remember, for this turn only, that no decision was reached (never per session: a
-        transient outage must not pin a whole session to the configured model)."""
-        if settings.route_per_turn and turn_id:
+        """Remember, for this turn only, that no decision was reached — in both
+        ``route_per_turn`` modes (the session-mode lookup also consults the turn memo). Never
+        per session: a transient outage must not pin a whole session to the configured model."""
+        if turn_id:
             self._memo.put_turn(turn_id, NO_DECISION)
 
     def _lookup(

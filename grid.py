@@ -18,8 +18,11 @@ now cross-checks the grid against the provider's own model list before a decisio
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import Any, Iterable, List, Optional, Sequence, Tuple
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -144,6 +147,10 @@ def parse_entry(raw: Any) -> Optional[Entry]:
     else:
         head, _, tail = text.partition(":")
         model_id, description = (head, tail) if " " in tail.strip() else (text, "")
+        if not description and tail and any(ch.isalpha() for ch in tail):
+            # "id:desc" with no space is read as ONE id (so "qwen3-coder:free" survives).
+            logger.debug("jev-effort-router: grid entry %r has no ': ' separator; read as the bare "
+                         "id %r (write 'id: description' to add a description)", text, text)
     model_id = model_id.strip()
     if not valid_model_id(model_id):
         return None

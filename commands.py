@@ -127,7 +127,7 @@ def _route_text(router, settings: Settings, task: str) -> str:
         [{"role": "user", "content": task}], settings.grid
     )
     if decision is None:
-        return f"No route ({reason}). {_hint_for(reason)}"
+        return f"No route ({reason}). {_hint_for(reason, settings)}"
     lines = [
         f"model:  {decision.model}",
         f"effort: {decision.effort}  (requested {decision.effort_requested})",

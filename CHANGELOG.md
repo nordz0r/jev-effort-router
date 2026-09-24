@@ -33,6 +33,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 - README nord example: `default_model: gldf-hermes`, illustrative grid with context windows,
   `zai/glm-5.3` as the direct glm id.
 
+- `status` reports `backend`, `mode`, `api_key_env`, and checks the key the router would use;
+  key hints and the registration warning name the configured variable and backend.
+
+### Fixed
+
+- `route_per_turn: false`: a failed turn (and an outage fallback) is memoized for that turn only, so
+  its tool loop does not call Jev again and the session is not pinned to the fallback.
+- Effort Score rounding is explicit half-up (`floor(x + 0.5)`), not banker's `round()`.
+
 ### Changed
 
 - Model question: "least capable tier that still completes the task", description-only options plus

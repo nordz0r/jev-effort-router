@@ -12,7 +12,7 @@ handler below takes ``args`` first.
 from __future__ import annotations
 
 import json
-from typing import Any, Callable, Dict, List, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from .client import JevClient
 from .config import Settings, api_key
@@ -150,7 +150,10 @@ def _status(router, settings: Settings, recent: int = 5) -> str:
     records = router.tail(settings, limit=max(1, min(int(recent or 5), 50)))
     payload = {
         "enabled": settings.enabled,
-        "api_key_present": bool(api_key()),
+        "api_key_present": bool(api_key(settings)),
+        "api_key_env": settings.api_key_env,
+        "backend": settings.backend,
+        "mode": settings.mode,
         "endpoint": settings.endpoint,
         "jev_model": settings.jev_model,
         "confidence_threshold": settings.confidence_threshold,
@@ -199,7 +202,7 @@ def _route(router, settings: Settings, task: str, context: str = "") -> str:
             {
                 "routed": False,
                 "reason": reason,
-                "hint": _hint_for(reason),
+                "hint": _hint_for(reason, settings),
             },
             ensure_ascii=False,
         )
@@ -223,15 +226,17 @@ def _route(router, settings: Settings, task: str, context: str = "") -> str:
     )
 
 
-def _hint_for(reason: Any) -> str:
+def _hint_for(reason: Any, settings: Optional[Settings] = None) -> str:
     from .client import REASON_NO_API_KEY, REASON_TIMEOUT, REASON_UPSTREAM_ERROR
+    from .config import key_hint
 
     if reason == REASON_NO_API_KEY:
-        return "Set OPENROUTER_API_KEY in the Hermes .env file, then restart the session."
+        return key_hint(settings)
     if reason == REASON_TIMEOUT:
         return "Jev did not answer inside the configured budget; raise timeout_s or retry."
     if reason == REASON_UPSTREAM_ERROR:
-        return "The Decisions API returned an error — check credits and network access."
+        backend = getattr(settings, "backend", "the decision")
+        return f"The {backend} backend returned an error — check the key, credits and network access."
     return "The decision was unusable; the turn would keep the configured model."
 
 

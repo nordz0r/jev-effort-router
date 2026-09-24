@@ -121,7 +121,7 @@ hermes jev-effort-router tail 20      # last audit records as JSON
 hermes jev-effort-router reset        # drop memoised decisions
 ```
 
-`status` reports whether routing is enabled, whether the key is present, the grid, and the most recent
+`status` reports whether routing is enabled, the backend, mode and key variable (`api_key_env`), whether that key is present (resolved exactly as the router does, through the profile secret scope), the grid, and the most recent
 decisions. `route` exercises Jev end-to-end without running a turn, and exits non-zero when routing fails.
 
 It also reports `grid_coverage` over the last 200 routed turns, which is how you notice a model the
@@ -267,7 +267,10 @@ strongest declared level is used. `none` is never chosen for an enabled request.
 verbatim to `reasoning_effort`, so declare only levels your upstream accepts. Without `efforts` the
 earlier rules apply (Ollama family table on Ollama routes, `unknown_effort` elsewhere). Entries accept
 the string form `"id: description"` (no `efforts`/`context`), a map `{id, description, efforts, context}`,
-or a one-key map `{id: description}` / `{id: {description, efforts, context}}`.
+or a one-key map `{id: description}` / `{id: {description, efforts, context}}`. In the string form the separator is
+`": "` (colon + space). A colon **without** a space does not split: `"a-model:does-a-thing"` is read as the
+single id `a-model:does-a-thing` (that is what keeps ids like `openrouter/qwen/qwen3-coder:free` and
+`nemotron-3-nano:30b` whole); a debug log line points it out. Write `"id: description"`.
 
 #### Context fit (`context`, `context_reserve_tokens`, `long_context_models`)
 
@@ -286,7 +289,7 @@ How the decision is made off Ollama:
 - The model question asks for the **least capable tier that still completes the task**; options are the
   descriptions only (no model ids) plus an `unclear` option, which resolves to `default_model`.
 - State sent to Jev: `user_message`, `user_message_chars`, `recent_context`.
-- Effort is a Score over low/medium/high, rounded; effort families and the Ollama catalog apply only to
+- Effort is a Score over low/medium/high (0..2), rounded half-up (`floor(x + 0.5)`: 0.5 → medium, 1.5 → high); effort families and the Ollama catalog apply only to
   Ollama providers. Elsewhere `unknown_effort` decides (default `omit`).
 - Below `confidence_threshold`: the more capable of (choice, `default_model`) by grid order — a
   distrusted answer never downgrades below the fallback. No `default_model` → request untouched.
