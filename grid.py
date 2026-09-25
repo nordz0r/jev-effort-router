@@ -112,7 +112,7 @@ def _efforts(raw: Any) -> Optional[Tuple[str, ...]]:
 def _context(raw: Any) -> Optional[int]:
     try:
         value = int(float(raw))
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return None
     return value if value > 0 else None
 
