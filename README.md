@@ -202,25 +202,32 @@ plugins:
         routed_providers: [custom:ocx]    # custom:zai and every other provider stay untouched
         backend: typesafe
         api_key_env: TYPESAFE_API_KEY     # in profiles/nord/.env; read via the profile secret scope
-        # Live default is a direct working model (probe 200). After Legion fixes the
-        # gldf-hermes combo to zai/glm-5.3 → xai/grok-4.7, switch default_model to
+        # Live default is a direct working model (probe 200). After Legion !4 retargets
+        # gldf-hermes to zai/glm-5.3 → xai/grok-4.7, switch default_model to
         # gldf-hermes (context 500000 — the grok member window).
         default_model: zai/glm-5.3
         default_effort: medium
         unknown_effort: omit
         confidence_threshold: 0.5
         context_reserve_tokens: 32000
-        # Final nord grid (Legion catalog 2026-09-25): least capable first.
-        # Only ids with probe HTTP 200. gemini-* excluded (Boss ban / 403).
+        # Final nord grid (Legion catalog 2026-09-25; gemini re-probe 10:31 MSK):
+        # least capable first. Only ids with probe HTTP 200.
         # xai/grok-4.7 efforts [low, medium, high, xhigh] but currently 403 — not in the active grid.
         grid:
-          - id: zai/glm-5.3-flash
-            context: 1000000
-            efforts: [low, high, max]
+          - id: google-antigravity/gemini-3.8-flash
+            context: 1048576
+            efforts: [low, medium, high]
             description: >-
               trivial request answered in one short step with no investigation:
               greeting or thanks, a one-line factual question, translating a
               sentence, fixing a named typo or renaming one string at a given place
+          - id: zai/glm-5.3-flash
+            context: 1000000
+            efforts: [low, high, max]
+            description: >-
+              short bounded task still needing a little judgment: a small code
+              tweak in one place, a brief explanation from a short snippet, a
+              one-file edit where the change is already named
           - id: zai/glm-5.3
             context: 1000000
             efforts: [low, high, max]
@@ -247,37 +254,44 @@ plugins:
         # Used (first that fits) only when neither the chosen model nor a more capable grid entry
         # fits the prompt.
         long_context_models:
+          - id: google-antigravity/gemini-3.1-pro
+            context: 1048576
+            efforts: [low, high]
           - id: zai/glm-5.3
             context: 1000000
             efforts: [low, high, max]
-          - id: zai/glm-5.3-flash
-            context: 1000000
-            efforts: [low, high, max]
+          - id: google-antigravity/gemini-3.8-flash
+            context: 1048576
+            efforts: [low, medium, high]
 ```
 
 Notes on this example:
 
 - **`default_model: zai/glm-5.3`**, not `gldf-hermes`. On dd the live `gldf-hermes` combo is still
-  `gemini-3.8-flash` → `xai/grok-4.7` → `gpt-6-luna` (first two currently 403). After Legion retargets
-  the combo to `zai/glm-5.3` → `xai/grok-4.7`, switch `default_model` to `gldf-hermes` with
+  `gemini-3.8-flash` → `xai/grok-4.7` → `gpt-6-luna` (`xai/grok-4.7` still 403). After Legion !4
+  retargets the combo to `zai/glm-5.3` → `xai/grok-4.7`, switch `default_model` to `gldf-hermes` with
   `context: 500000` (grok member window). `xai/grok-4.7` efforts are `[low, medium, high, xhigh]`
-  but are currently 403, so they are not in the active shadow grid.
-- **`gemini-*` excluded** (Boss ban / 403). Do not add them back without an explicit unban.
+  but remain 403, so they are not in the active shadow grid.
+- **Gemini re-probe (10:31 MSK).** After the Antigravity profile switch, full ids
+  `google-antigravity/gemini-3.8-flash` and `google-antigravity/gemini-3.1-pro` probe HTTP 200
+  (ctx 1048576). Flash is grid[0] (trivial); pro is first in `long_context_models`.
 - GLM has no `medium`; `efforts: [low, high, max]` rounds medium→high. Grid order is least→most
   capable (fallback `max()` and context escalation both use it).
 - **Exact id match.** The session's configured model (`model.default`) must equal a grid id
   exactly, or the turn is left alone. Jev's answer is mapped back to the grid by position, never by name.
 
-Context windows in the active nord grid (probe HTTP 200 via ocx, 2026-09-25):
+Context windows in the active nord grid (probe HTTP 200 via ocx, 2026-09-25; gemini re-probe 10:31 MSK):
 
 | Model | Window | Efforts | Notes |
 |---|---|---|---|
+| google-antigravity/gemini-3.8-flash | 1M | low, medium, high | exact; grid[0] trivial |
 | zai/glm-5.3-flash | 1M | low, high, max | exact |
 | zai/glm-5.3 | 1M | low, high, max | exact; live `default_model` |
 | gpt-6-sol | 272k | low, medium, high, xhigh, max | exact |
 | gpt-6-astra | 272k | low, medium, high, xhigh, max | exact |
+| google-antigravity/gemini-3.1-pro | 1M | low, high | exact; long_context first |
 | xai/grok-4.7 | 500k | low, medium, high, xhigh | exact; 403 — not in active grid |
-| gldf-hermes | 500k | (adaptive / omit) | combo; switch default here after Legion retarget |
+| gldf-hermes | 500k | (adaptive / omit) | combo; switch default after Legion !4 (glm→grok) |
 
 #### Per-model effort levels (`efforts`)
 
