@@ -202,60 +202,82 @@ plugins:
         routed_providers: [custom:ocx]    # custom:zai and every other provider stay untouched
         backend: typesafe
         api_key_env: TYPESAFE_API_KEY     # in profiles/nord/.env; read via the profile secret scope
-        default_model: gldf-hermes        # existing ocx combo (failover zai/glm-5.3 -> xai/grok-4.7)
+        # Live default is a direct working model (probe 200). After Legion fixes the
+        # gldf-hermes combo to zai/glm-5.3 → xai/grok-4.7, switch default_model to
+        # gldf-hermes (context 500000 — the grok member window).
+        default_model: zai/glm-5.3
         default_effort: medium
         unknown_effort: omit
+        confidence_threshold: 0.5
         context_reserve_tokens: 32000
-        # ILLUSTRATIVE grid - the final tier table comes from the owner. Least capable first:
-        # grid order is the tier order (fallback max() and context escalation both use it).
+        # Final nord grid (Legion catalog 2026-09-25): least capable first.
+        # Only ids with probe HTTP 200. gemini-* excluded (Boss ban / 403).
+        # xai/grok-4.7 efforts [low, medium, high, xhigh] but currently 403 — not in the active grid.
         grid:
-          - id: gemini-3.8-flash          # EXAMPLE id: exact ocx id unconfirmed
+          - id: zai/glm-5.3-flash
             context: 1000000
-            description: "trivial request answered in one short step with no investigation: greeting or
-              thanks, a one-line factual question, translating a sentence, fixing a named typo or renaming
-              one string at a given place"
-          - id: gldf-flash                # the profile's model.default; window not declared = unknown
-            description: "bounded task needing some judgment: write or change code in one or two files,
-              explain an error from a short log or traceback, write tests or a script, search or summarise
-              a pasted document, run a known sequence of tool commands"
-          - id: gldf-hermes
-            context: 500000               # the smaller member window: the failover may land on grok-4.7
-            description: "hard or open-ended task where a mistake is costly: architecture or migration
-              design, refactoring across several modules, root-cause debugging of intermittent or
-              production failures, reasoning across several long files, or a short follow-up that
-              continues such a task from recent_context"
+            efforts: [low, high, max]
+            description: >-
+              trivial request answered in one short step with no investigation:
+              greeting or thanks, a one-line factual question, translating a
+              sentence, fixing a named typo or renaming one string at a given place
+          - id: zai/glm-5.3
+            context: 1000000
+            efforts: [low, high, max]
+            description: >-
+              bounded task needing some judgment: write or change code in one or
+              two files, explain an error from a short log or traceback, write
+              tests or a script, search or summarise a pasted document, run a
+              known sequence of tool commands
+          - id: gpt-6-sol
+            context: 272000
+            efforts: [low, medium, high, xhigh, max]
+            description: >-
+              hard or open-ended task where a mistake is costly: architecture or
+              migration design, refactoring across several modules, root-cause
+              debugging of intermittent or production failures, reasoning across
+              several long files, or a short follow-up that continues such a task
+              from recent_context
+          - id: gpt-6-astra
+            context: 272000
+            efforts: [low, medium, high, xhigh, max]
+            description: >-
+              hardest tasks among the working set: multi-agent style planning,
+              large migrations, or cases where gpt-6-sol is not enough
         # Used (first that fits) only when neither the chosen model nor a more capable grid entry
         # fits the prompt.
         long_context_models:
           - id: zai/glm-5.3
             context: 1000000
-            efforts: [low, high, max, ultra]   # medium is rounded up to high
-          - id: gemini-3.1-pro            # EXAMPLE id: exact ocx id unconfirmed
+            efforts: [low, high, max]
+          - id: zai/glm-5.3-flash
             context: 1000000
+            efforts: [low, high, max]
 ```
 
 Notes on this example:
 
-- `gldf-hermes` is an existing ocx combo, being converted to a failover `zai/glm-5.3` → `xai/grok-4.7`.
-  The direct glm id on ocx is `zai/glm-5.3` (note the `zai/` prefix); to route to it without the
-  combo, use `zai/glm-5.3` both as the grid entry and as `default_model`.
-- **The grid is illustrative.** Ids marked EXAMPLE are not confirmed against the ocx catalog; replace them
-  once the owner's tier table arrives. Descriptions are the tier criteria from Jev's own evaluation
-  (`fast` / `general` / `strong`), mapped onto ocx ids, and are not re-measured on this deployment.
-- **Exact id match.** The session's configured model (`model.default`, here `gldf-flash`) must equal a grid
-  id exactly, or the turn is left alone. Jev's answer is mapped back to the grid by position, never by name.
+- **`default_model: zai/glm-5.3`**, not `gldf-hermes`. On dd the live `gldf-hermes` combo is still
+  `gemini-3.8-flash` → `xai/grok-4.7` → `gpt-6-luna` (first two currently 403). After Legion retargets
+  the combo to `zai/glm-5.3` → `xai/grok-4.7`, switch `default_model` to `gldf-hermes` with
+  `context: 500000` (grok member window). `xai/grok-4.7` efforts are `[low, medium, high, xhigh]`
+  but are currently 403, so they are not in the active shadow grid.
+- **`gemini-*` excluded** (Boss ban / 403). Do not add them back without an explicit unban.
+- GLM has no `medium`; `efforts: [low, high, max]` rounds medium→high. Grid order is least→most
+  capable (fallback `max()` and context escalation both use it).
+- **Exact id match.** The session's configured model (`model.default`) must equal a grid id
+  exactly, or the turn is left alone. Jev's answer is mapped back to the grid by position, never by name.
 
-Context windows known so far (from the deployment, via Jev), for filling in `context`:
+Context windows in the active nord grid (probe HTTP 200 via ocx, 2026-09-25):
 
-| Model | Window | Id on ocx |
-|---|---|---|
-| gemini-3.8-flash | 1M | example, unconfirmed |
-| zai/glm-5.3 | 1M | exact |
-| glm-5.3-flash | 1M | example, unconfirmed |
-| grok-4.20-reasoning | 1M | example, unconfirmed |
-| gemini-3.1-pro | 1M | example, unconfirmed |
-| xai/grok-4.7 | 500k | exact |
-| gpt-6-* | 272k | family; exact ids unconfirmed |
+| Model | Window | Efforts | Notes |
+|---|---|---|---|
+| zai/glm-5.3-flash | 1M | low, high, max | exact |
+| zai/glm-5.3 | 1M | low, high, max | exact; live `default_model` |
+| gpt-6-sol | 272k | low, medium, high, xhigh, max | exact |
+| gpt-6-astra | 272k | low, medium, high, xhigh, max | exact |
+| xai/grok-4.7 | 500k | low, medium, high, xhigh | exact; 403 — not in active grid |
+| gldf-hermes | 500k | (adaptive / omit) | combo; switch default here after Legion retarget |
 
 #### Per-model effort levels (`efforts`)
 
