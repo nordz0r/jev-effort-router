@@ -147,7 +147,9 @@ class Router:
             if api_mode and api_mode not in ROUTED_API_MODES:
                 self._record_skip(settings, REASON_SKIPPED_API_MODE, where, extra={"api_mode": api_mode})
                 return None
-            if settings.entry_for(model) is None:
+            # entry_only default_model still sits on the full grid (entry_for sees it); the
+            # explicit default_model check covers a session model that matches the fallback id.
+            if settings.entry_for(model) is None and model != settings.default_model:
                 self._record_skip(settings, REASON_SKIPPED_MODEL, where)
                 return None
             if not isinstance(request, dict) or not isinstance(original_request, dict):
@@ -307,7 +309,7 @@ class Router:
         try:
             decision, reason = self.client(settings).decide(
                 messages,
-                settings.grid,
+                settings.choice_grid,
                 platform=where.platform,
                 provider=where.provider,
                 effort_families=ollama,

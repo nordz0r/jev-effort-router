@@ -8,6 +8,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- `entry_only` on grid entries: session entry / `default_model` fallback still passes the gate and is visible to `entry_for`, but is omitted from Jev Choice criteria and from low-conf escalation (`max(choice, default)` treats it as weaker than any destination tier).
 - Routing on any configured provider, e.g. an OpenCodex (ocx) `custom_providers` entry:
   `routed_providers` (the `custom:` prefix is ignored; unset = `ollama-cloud`, `[]` = none) and
   `routed_base_urls` (boundary match). A bare `custom` provider is resolved to its entry name by

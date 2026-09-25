@@ -111,7 +111,7 @@ config_schema:
     type: list
     default: null
     label: Routing grid override
-    description: 'Optional list replacing the built-in grid, least capable first. Each entry is "model-id: description" or a map {id, description, efforts, context}; efforts lists the levels the model accepts (the chosen level is rounded up onto them), context is its window in tokens.'
+    description: 'Optional list replacing the built-in grid, least capable first. Each entry is "model-id: description" or a map {id, description, efforts, context, entry_only}; efforts lists the levels the model accepts (the chosen level is rounded up onto them), context is its window in tokens, entry_only keeps the id as session entry/fallback off Jev Choice.'
   routed_providers:
     type: list
     default: null

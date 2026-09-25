@@ -12,7 +12,7 @@ import os
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
-from .grid import DEFAULT_GRID, Entry, parse_entry, parse_grid
+from .grid import DEFAULT_GRID, Entry, choice_grid as _choice_grid, parse_entry, parse_grid
 
 #: Hermes provider names of Ollama:cloud. Routed by default, and the only provider whose model
 #: cache (``catalog.py``) and per-family effort table (``effort.py``) apply.
@@ -183,6 +183,11 @@ class Settings:
     def grid_ids(self) -> Tuple[str, ...]:
         return tuple(entry.model_id for entry in self.grid)
 
+    @property
+    def choice_grid(self) -> Tuple[Entry, ...]:
+        """Grid rows offered to Jev Choice (excludes ``entry_only``)."""
+        return _choice_grid(self.grid)
+
     def long_context_entry(self, item: Entry) -> Entry:
         """A ``long_context_models`` item, completed from its grid entry when it only names an id."""
         grid_entry = self.entry_for(item.model_id)
@@ -193,6 +198,7 @@ class Settings:
             item.description or grid_entry.description,
             item.efforts or grid_entry.efforts,
             item.context or grid_entry.context,
+            item.entry_only or grid_entry.entry_only,
         )
 
     def entry_for(self, model_id: str) -> Optional[Entry]:

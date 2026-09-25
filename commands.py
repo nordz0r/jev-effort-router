@@ -124,7 +124,7 @@ def _coverage_text(coverage: dict) -> list:
 
 def _route_text(router, settings: Settings, task: str) -> str:
     decision, reason = router.client(settings).decide(
-        [{"role": "user", "content": task}], settings.grid
+        [{"role": "user", "content": task}], settings.choice_grid
     )
     if decision is None:
         return f"No route ({reason}). {_hint_for(reason, settings)}"

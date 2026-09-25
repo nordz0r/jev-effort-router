@@ -340,7 +340,15 @@ class JevClient:
 
 
 def _more_capable(grid: Sequence[Entry], first: Entry, second: Entry) -> Entry:
-    """The later of two entries in grid order (the grid lists tiers least capable first)."""
+    """The later of two entries in grid order (the grid lists tiers least capable first).
+
+    ``entry_only`` is session entry / fallback, not an escalating tier: when only one of the
+    two is ``entry_only``, the destination tier wins. Callers normally pass the Choice grid
+    (no ``entry_only`` rows); an ``entry_only`` fallback then has order ``-1`` and loses to
+    any destination choice — same outcome.
+    """
+    if first.entry_only != second.entry_only:
+        return second if first.entry_only else first
     order = {entry.model_id: index for index, entry in enumerate(grid)}
     return max((first, second), key=lambda entry: order.get(entry.model_id, -1))
 
