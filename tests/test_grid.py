@@ -86,3 +86,11 @@ def test_parse_grid_honours_an_override_and_dedupes():
 def test_parse_grid_accepts_a_multiline_string():
     grid = parse_grid("alpha: first\nbeta: second")
     assert [entry.model_id for entry in grid] == ["alpha", "beta"]
+
+
+def test_infinite_context_does_not_crash():
+    """YAML ``context: .inf`` becomes float('inf'); int() would OverflowError without a catch."""
+    entry = parse_entry({"id": "m", "description": "d", "context": float("inf")})
+    assert entry is not None and entry.context is None
+    assert parse_entry({"id": "m", "description": "d", "context": float("-inf")}).context is None
+    assert parse_entry({"id": "m", "description": "d", "context": float("nan")}).context is None

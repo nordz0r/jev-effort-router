@@ -289,13 +289,24 @@ def test_readme_nord_example_is_a_valid_configuration():
 
     assert settings.mode == "shadow" and settings.backend == "typesafe"
     assert settings.api_key_env == "TYPESAFE_API_KEY" and settings.jev_model == "jev-1.13.0"
-    assert [e.model_id for e in settings.grid] == ["gemini-3.8-flash", "gldf-flash", "gldf-hermes"]
-    assert settings.default_model == "gldf-hermes" and settings.entry_for("gldf-hermes").context == 500000
-    assert settings.grid[0].context == 1_000_000 and settings.grid[1].context is None
-    glm = settings.long_context_models[0]
-    assert glm.model_id == "zai/glm-5.3" and glm.efforts == ("low", "high", "max", "ultra")
+    assert settings.default_model == "zai/glm-5.3" and settings.confidence_threshold == 0.5
+    assert [e.model_id for e in settings.grid] == [
+        "zai/glm-5.3-flash",
+        "zai/glm-5.3",
+        "gpt-6-sol",
+        "gpt-6-astra",
+    ]
+    assert settings.entry_for("zai/glm-5.3").context == 1_000_000
+    assert settings.entry_for("zai/glm-5.3").efforts == ("low", "high", "max")
+    assert settings.entry_for("gpt-6-sol").context == 272000
+    assert settings.entry_for("gpt-6-sol").efforts == ("low", "medium", "high", "xhigh", "max")
+    assert settings.entry_for("gpt-6-astra").context == 272000
+    long_ids = [e.model_id for e in settings.long_context_models]
+    assert long_ids == ["zai/glm-5.3", "zai/glm-5.3-flash"]
+    assert settings.long_context_models[0].efforts == ("low", "high", "max")
     assert settings.context_reserve_tokens == 32000
-    assert "glm-grok-failover" not in text and "xai/glm" not in text
+    assert "gemini-3.8-flash" not in [e.model_id for e in settings.grid]
+    assert "gldf-hermes" not in [e.model_id for e in settings.grid]
     assert settings.match("custom:ocx") and not settings.match("custom:zai")
 
 
@@ -407,6 +418,34 @@ def test_estimate_is_chars_over_four_across_messages_and_tools():
     import json as _json
     chars = len(_json.dumps(request["messages"])) + len(_json.dumps(request["tools"]))
     assert estimate_tokens(request) == -(-chars // 4)
+
+
+def test_estimate_does_not_count_base64_image_payloads_as_text():
+    from fit import IMAGE_TOKEN_COST, estimate_tokens
+
+    huge = "A" * 1_000_000  # ~1MB base64-ish payload
+    request = {
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "what is in this image?"},
+                    {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{huge}"}},
+                ],
+            }
+        ]
+    }
+    estimate = estimate_tokens(request)
+    # Must stay near text size + one fixed image cost — never ~250k+ from the base64.
+    assert estimate < 5_000, estimate
+    assert estimate >= IMAGE_TOKEN_COST
+    text_only = {
+        "messages": [{"role": "user", "content": [{"type": "text", "text": "what is in this image?"}]}]
+    }
+    # Scrubbed stub adds a few dozen chars; base64 must not dominate.
+    assert estimate - estimate_tokens(text_only) < IMAGE_TOKEN_COST + 100
+    bare = {"messages": [{"role": "user", "content": "x" + huge}]}
+    assert estimate_tokens(bare) > 200_000
 
 
 def test_a_model_that_does_not_fit_escalates_up_the_grid(tmp_path):
