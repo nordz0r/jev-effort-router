@@ -156,16 +156,17 @@ form generated from `plugin.yaml`.
 | `endpoint` | per backend | `https://api.typesafe.ai/v1/systemone` / `https://openrouter.ai/api/alpha/decisions`. |
 | `api_key_env` | per backend | `TYPESAFE_API_KEY` / `OPENROUTER_API_KEY`. Name only — never the key itself. |
 | `jev_model` | per backend | `jev-1.13.0` / `typesafe/jev-1.13`. On `typesafe`, `typesafe/jev-1.13` is mapped to `jev-1.13.0`. |
-| `confidence_threshold` | `0.5` | Below this, the more capable of Jev's choice and `default_model` (by grid order) is used; with no `default_model` the configured model is kept. |
+| `confidence_threshold` | `0.5` | Below this, the more capable of Jev's choice and `default_model` (by destination-grid order) is used; an `entry_only` default is never an escalation target. With no `default_model` the configured model is kept. |
 | `timeout_s` | `2.0` | Budget for the decision call, including one retry on HTTP 429/529. |
-| `default_model` | `""` | Grid id used below threshold, on an `unclear` answer, and when Jev is unavailable. Empty keeps the configured model. |
+| `default_model` | `""` | Grid id used below threshold, on an `unclear` answer, and when Jev is unavailable. May be an `entry_only` row. Empty keeps the configured model. |
 | `default_effort` | `medium` | Effort used with the fallback model. |
 | `context_turns` | `4` | Preceding turns sent to Jev as recent context. |
 | `route_per_turn` | `true` | Off routes once per session instead of once per user turn. |
 | `audit_enabled` | `true` | Append one JSONL record per turn under the plugin data directory. |
 | `log_skips` | `true` | Record why a turn was left unrouted. |
 | `include_user_message_in_audit` | `false` | Off keeps conversation content out of the audit. |
-| `grid` | `null` | Optional list replacing the built-in grid: `"model-id: description"` strings, one-key maps, or `{id, description, efforts, context}` maps. **List it least capable first** — that order is the tier order. |
+| `grid` | `null` | Optional list replacing the built-in grid: `"model-id: description"` strings, one-key maps, or `{id, description, efforts, context, entry_only}` maps. **List destination tiers least capable first** — that order is the tier order. |
+| `entry_only` | `false` | Per-grid-entry flag (`entry_only: true`). The id still passes the session-model gate and works as `default_model` fallback via `entry_for`, but is **omitted from Jev Choice criteria** (not a selectable / escalating tier). |
 | `routed_providers` | `[ollama-cloud]` | Hermes provider names whose requests are routed. The `custom:` prefix is ignored (`custom:ocx` = `ocx`). Unset = default; `[]` = none. |
 | `routed_base_urls` | `[]` | Also route requests whose `base_url` equals an entry or continues it after `/`. A request with an empty provider name is never routed. |
 | `catalog_check` | `true` | Check decisions against Hermes' Ollama:cloud model cache (Ollama providers only). |
@@ -198,22 +199,24 @@ plugins:
   entries:
     jev-effort-router:
       settings:
-        mode: shadow                      # collect 20-50 real turns, then switch to: route
+        mode: route                       # first install: shadow for 20–50 turns, then route
         routed_providers: [custom:ocx]    # custom:zai and every other provider stay untouched
         backend: typesafe
         api_key_env: TYPESAFE_API_KEY     # in profiles/nord/.env; read via the profile secret scope
-        # Live default is a direct working model (probe 200). After Legion !4 retargets
-        # gldf-hermes to zai/glm-5.3 → xai/grok-4.7, switch default_model to
-        # gldf-hermes (context 500000 — the grok member window).
-        default_model: zai/glm-5.3
+        # Smart entry: session model = gldf-hermes (ocx combo). entry_only keeps it off
+        # Jev Choice; default_model fallback and the session gate still see it.
+        default_model: gldf-hermes
         default_effort: medium
         unknown_effort: omit
         confidence_threshold: 0.5
         context_reserve_tokens: 32000
         # Final nord grid (Legion catalog 2026-09-25; gemini re-probe 10:31 MSK):
-        # least capable first. Only ids with probe HTTP 200.
+        # gldf-hermes first as entry_only, then destination tiers least→most capable.
         # xai/grok-4.7 efforts [low, medium, high, xhigh] but currently 403 — not in the active grid.
         grid:
+          - id: gldf-hermes
+            context: 500000
+            entry_only: true
           - id: google-antigravity/gemini-3.8-flash
             context: 1048576
             efforts: [low, medium, high]
@@ -267,31 +270,31 @@ plugins:
 
 Notes on this example:
 
-- **`default_model: zai/glm-5.3`**, not `gldf-hermes`. On dd the live `gldf-hermes` combo is still
-  `gemini-3.8-flash` → `xai/grok-4.7` → `gpt-6-luna` (`xai/grok-4.7` still 403). After Legion !4
-  retargets the combo to `zai/glm-5.3` → `xai/grok-4.7`, switch `default_model` to `gldf-hermes` with
-  `context: 500000` (grok member window). `xai/grok-4.7` efforts are `[low, medium, high, xhigh]`
-  but remain 403, so they are not in the active shadow grid.
+- **`default_model: gldf-hermes`** with **`entry_only: true`**. The combo is the session entry and
+  unclear/unavailable fallback; it is omitted from Jev Choice criteria so Jev never picks it as a
+  tier. Low-conf `max(choice, default)` treats `entry_only` as weaker than any destination choice.
+  Legion applies the live nord yaml on dd; this README is the plugin-side example only.
 - **Gemini re-probe (10:31 MSK).** After the Antigravity profile switch, full ids
   `google-antigravity/gemini-3.8-flash` and `google-antigravity/gemini-3.1-pro` probe HTTP 200
-  (ctx 1048576). Flash is grid[0] (trivial); pro is first in `long_context_models`.
-- GLM has no `medium`; `efforts: [low, high, max]` rounds medium→high. Grid order is least→most
-  capable (fallback `max()` and context escalation both use it).
+  (ctx 1048576). Flash is the first *destination* tier (trivial); pro is first in `long_context_models`.
+- GLM has no `medium`; `efforts: [low, high, max]` rounds medium→high. Destination-grid order is
+  least→most capable (fallback `max()` and context escalation both use it).
 - **Exact id match.** The session's configured model (`model.default`) must equal a grid id
-  exactly, or the turn is left alone. Jev's answer is mapped back to the grid by position, never by name.
+  (including an `entry_only` row) or `default_model`, or the turn is left alone. Jev's answer is
+  mapped back to the *destination* grid by position, never by name.
 
 Context windows in the active nord grid (probe HTTP 200 via ocx, 2026-09-25; gemini re-probe 10:31 MSK):
 
 | Model | Window | Efforts | Notes |
 |---|---|---|---|
-| google-antigravity/gemini-3.8-flash | 1M | low, medium, high | exact; grid[0] trivial |
+| gldf-hermes | 500k | (omit) | combo; `entry_only` + `default_model` |
+| google-antigravity/gemini-3.8-flash | 1M | low, medium, high | exact; first destination tier |
 | zai/glm-5.3-flash | 1M | low, high, max | exact |
-| zai/glm-5.3 | 1M | low, high, max | exact; live `default_model` |
+| zai/glm-5.3 | 1M | low, high, max | exact |
 | gpt-6-sol | 272k | low, medium, high, xhigh, max | exact |
 | gpt-6-astra | 272k | low, medium, high, xhigh, max | exact |
 | google-antigravity/gemini-3.1-pro | 1M | low, high | exact; long_context first |
 | xai/grok-4.7 | 500k | low, medium, high, xhigh | exact; 403 — not in active grid |
-| gldf-hermes | 500k | (adaptive / omit) | combo; switch default after Legion !4 (glm→grok) |
 
 #### Per-model effort levels (`efforts`)
 
@@ -302,8 +305,9 @@ A grid entry (or `long_context_models` entry) may declare the levels the model a
 strongest declared level is used. `none` is never chosen for an enabled request. The value is written
 verbatim to `reasoning_effort`, so declare only levels your upstream accepts. Without `efforts` the
 earlier rules apply (Ollama family table on Ollama routes, `unknown_effort` elsewhere). Entries accept
-the string form `"id: description"` (no `efforts`/`context`), a map `{id, description, efforts, context}`,
-or a one-key map `{id: description}` / `{id: {description, efforts, context}}`. In the string form the separator is
+the string form `"id: description"` (no `efforts`/`context`/`entry_only`), a map
+`{id, description, efforts, context, entry_only}`, or a one-key map `{id: description}` /
+`{id: {description, efforts, context, entry_only}}`. In the string form the separator is
 `": "` (colon + space). A colon **without** a space does not split: `"a-model:does-a-thing"` is read as the
 single id `a-model:does-a-thing` (that is what keeps ids like `openrouter/qwen/qwen3-coder:free` and
 `nemotron-3-nano:30b` whole); a debug log line points it out. Write `"id: description"`.
@@ -323,12 +327,14 @@ loop), on the fallback paths, and in shadow mode (the `shadow` record shows the 
 How the decision is made off Ollama:
 
 - The model question asks for the **least capable tier that still completes the task**; options are the
-  descriptions only (no model ids) plus an `unclear` option, which resolves to `default_model`.
+  destination-grid descriptions only (no model ids, no `entry_only` rows) plus an `unclear` option,
+  which resolves to `default_model`.
 - State sent to Jev: `user_message`, `user_message_chars`, `recent_context`.
 - Effort is a Score over low/medium/high (0..2), rounded half-up (`floor(x + 0.5)`: 0.5 → medium, 1.5 → high); effort families and the Ollama catalog apply only to
   Ollama providers. Elsewhere `unknown_effort` decides (default `omit`).
-- Below `confidence_threshold`: the more capable of (choice, `default_model`) by grid order — a
-  distrusted answer never downgrades below the fallback. No `default_model` → request untouched.
+- Below `confidence_threshold`: the more capable of (choice, `default_model`) by destination-grid
+  order — a distrusted answer never downgrades below the fallback, and an `entry_only` default never
+  escalates a later destination choice. No `default_model` → request untouched.
 - Jev unavailable (timeout, HTTP error, malformed answer): `default_model` at `default_effort` if it is on
   the grid, else untouched. A missing key never calls Jev and leaves the request untouched.
 
@@ -343,7 +349,7 @@ Notably, it touches only what it owns:
 
 - **Provider** — only `routed_providers` / `routed_base_urls` are routed (default `ollama-cloud`); any other provider passes through untouched.
 - **API mode** — only `chat_completions`; a Responses or Anthropic-Messages route is left alone.
-- **Model** — a model outside the configured grid is not routed.
+- **Model** — a model outside the configured grid is not routed (unless it equals `default_model`).
 - **Auxiliary calls** — titling, compression, MoA and vision calls are not routed, only the main turn.
 
 ### One decision per user turn

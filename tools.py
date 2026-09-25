@@ -109,7 +109,7 @@ def _grid_coverage(router, settings: Settings, sample: int = GRID_COVERAGE_SAMPL
         return {}
 
     # The probabilities are keyed by position ("1".."6"), so the grid gives the mapping back.
-    by_position = {str(i): entry.model_id for i, entry in enumerate(settings.grid, start=1)}
+    by_position = {str(i): entry.model_id for i, entry in enumerate(settings.choice_grid, start=1)}
 
     applied: Dict[str, int] = {}
     below: Dict[str, int] = {}
@@ -136,7 +136,7 @@ def _grid_coverage(router, settings: Settings, sample: int = GRID_COVERAGE_SAMPL
     }
     never = [
         entry.model_id
-        for entry in settings.grid
+        for entry in settings.choice_grid
         if entry.model_id not in applied and entry.model_id not in below
     ]
     if never:
@@ -163,7 +163,8 @@ def _status(router, settings: Settings, recent: int = 5) -> str:
         "grid": [
             {"model": entry.model_id, "profile": entry.description,
              **({"efforts": list(entry.efforts)} if entry.efforts else {}),
-             **({"context": entry.context} if entry.context else {})}
+             **({"context": entry.context} if entry.context else {}),
+             **({"entry_only": True} if entry.entry_only else {})}
             for entry in settings.grid
         ],
         "audit": {
@@ -195,7 +196,7 @@ def _route(router, settings: Settings, task: str, context: str = "") -> str:
         ]
 
     decision, reason = router.client(settings).decide(
-        messages, settings.grid
+        messages, settings.choice_grid
     )
     if decision is None:
         return json.dumps(

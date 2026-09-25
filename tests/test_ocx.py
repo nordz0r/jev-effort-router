@@ -287,10 +287,21 @@ def test_readme_nord_example_is_a_valid_configuration():
     settings_map = yaml.safe_load(block)["plugins"]["entries"]["jev-effort-router"]["settings"]
     settings = load_settings(lambda key, default=None: settings_map.get(key, default))
 
-    assert settings.mode == "shadow" and settings.backend == "typesafe"
+    assert settings.mode == "route" and settings.backend == "typesafe"
     assert settings.api_key_env == "TYPESAFE_API_KEY" and settings.jev_model == "jev-1.13.0"
-    assert settings.default_model == "zai/glm-5.3" and settings.confidence_threshold == 0.5
+    assert settings.default_model == "gldf-hermes" and settings.confidence_threshold == 0.5
     assert [e.model_id for e in settings.grid] == [
+        "gldf-hermes",
+        "google-antigravity/gemini-3.8-flash",
+        "zai/glm-5.3-flash",
+        "zai/glm-5.3",
+        "gpt-6-sol",
+        "gpt-6-astra",
+    ]
+    hermes = settings.entry_for("gldf-hermes")
+    assert hermes.entry_only is True and hermes.context == 500000
+    assert hermes.description == ""
+    assert [e.model_id for e in settings.choice_grid] == [
         "google-antigravity/gemini-3.8-flash",
         "zai/glm-5.3-flash",
         "zai/glm-5.3",
@@ -298,9 +309,9 @@ def test_readme_nord_example_is_a_valid_configuration():
         "gpt-6-astra",
     ]
     flash = settings.entry_for("google-antigravity/gemini-3.8-flash")
-    assert flash.context == 1_048_576
+    assert flash.context == 1_048_576 and flash.entry_only is False
     assert flash.efforts == ("low", "medium", "high")
-    assert "trivial request answered in one short step" in flash.description
+    assert "trivial request answered in one short step with no investigation" in flash.description
     assert settings.entry_for("zai/glm-5.3-flash").context == 1_000_000
     assert settings.entry_for("zai/glm-5.3-flash").efforts == ("low", "high", "max")
     assert "short bounded task still needing a little judgment" in settings.entry_for("zai/glm-5.3-flash").description
@@ -320,7 +331,6 @@ def test_readme_nord_example_is_a_valid_configuration():
     assert settings.long_context_models[1].efforts == ("low", "high", "max")
     assert settings.long_context_models[2].efforts == ("low", "medium", "high")
     assert settings.context_reserve_tokens == 32000
-    assert "gldf-hermes" not in [e.model_id for e in settings.grid]
     assert "xai/grok-4.7" not in [e.model_id for e in settings.grid]
     assert settings.match("custom:ocx") and not settings.match("custom:zai")
 

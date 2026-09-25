@@ -38,6 +38,8 @@ class Entry:
     efforts: Optional[Tuple[str, ...]] = None
     #: Context window in tokens. ``None``: unknown, treated as fitting any prompt.
     context: Optional[int] = None
+    #: Session entry / ``default_model`` fallback only — omitted from Jev Choice criteria.
+    entry_only: bool = False
 
     @property
     def criterion(self) -> str:
@@ -117,10 +119,22 @@ def _context(raw: Any) -> Optional[int]:
     return value if value > 0 else None
 
 
+def _entry_only(raw: Any) -> bool:
+    """Truthy ``entry_only`` from yaml (bool, or strings the config helper already accepts)."""
+    if isinstance(raw, bool):
+        return raw
+    if isinstance(raw, str):
+        return raw.strip().lower() in {"1", "true", "yes", "on"}
+    if isinstance(raw, (int, float)):
+        return bool(raw)
+    return False
+
+
 def parse_entry(raw: Any) -> Optional[Entry]:
-    """Parse ``"model-id: description"``, a ``{id, description, efforts, context}`` mapping, or
-    a one-key ``{model-id: description}`` mapping (what unquoted YAML ``- combo/fast: trivial``
-    yields) whose value may itself be a ``{description, efforts, context}`` mapping.
+    """Parse ``"model-id: description"``, a ``{id, description, efforts, context, entry_only}``
+    mapping, or a one-key ``{model-id: description}`` mapping (what unquoted YAML
+    ``- combo/fast: trivial`` yields) whose value may itself be a
+    ``{description, efforts, context, entry_only}`` mapping.
 
     A string splits on ``": "``; failing that, on the first ``":"`` only when the rest reads
     like a description (has a space), so ``openrouter/qwen/qwen3-coder:free`` stays one id.
@@ -138,7 +152,13 @@ def parse_entry(raw: Any) -> Optional[Entry]:
         if not valid_model_id(model_id):
             return None
         description = str(fields.get("description") or fields.get("profile") or "").strip()
-        return Entry(model_id, description, _efforts(fields.get("efforts")), _context(fields.get("context")))
+        return Entry(
+            model_id,
+            description,
+            _efforts(fields.get("efforts")),
+            _context(fields.get("context")),
+            _entry_only(fields.get("entry_only")),
+        )
     text = str(raw or "").strip()
     if not text:
         return None
@@ -184,12 +204,20 @@ def parse_grid(raw: Any) -> Tuple[Entry, ...]:
     return tuple(parsed) if parsed else DEFAULT_GRID
 
 
+def choice_grid(grid: Sequence[Entry]) -> Tuple[Entry, ...]:
+    """Entries offered to Jev Choice. ``entry_only`` rows stay on the full grid for the
+    session gate and ``default_model`` fallback, but are not selectable tiers."""
+    return tuple(entry for entry in grid if not entry.entry_only)
+
+
 def criteria(grid: Sequence[Entry]) -> dict:
     """The ``criteria`` map for the model Choice question.
 
     Keyed by position (``"1"``, ``"2"``, ...) rather than by model id: Jev returns the
     criterion *key*, so a stable key decouples the answer from the description text and a
     description can be rewritten without silently changing which model is selected.
+    Pass :func:`choice_grid` (not the full grid) so ``entry_only`` rows are omitted and
+    indices stay stable for the filtered list.
     """
     return {str(index): entry.criterion for index, entry in enumerate(grid, start=1)}
 
